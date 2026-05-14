@@ -79,6 +79,12 @@ class MegatronTrainer(BaseMegatronTrainer):
         else:
             lm_loss = lm_loss.clone()
         local_num_tokens = loss[1].detach().clone().to(torch.int)
+        # MiniMax alignment: put local token-count normalization inside the
+        # autograd graph. Megatron finalization may still use local_num_tokens
+        # for bookkeeping/logging, but backward CPs should see mean-over-valid
+        # tokens rather than raw summed loss.
+        lm_loss = lm_loss / torch.clamp(local_num_tokens.to(lm_loss.dtype), min=1)
+
         metrics = {'loss': reporting_loss}
         if args.enable_channel_loss:
             metrics.update(self._compute_channel_loss(losses, loss_mask, channels, packed_seq_params))
