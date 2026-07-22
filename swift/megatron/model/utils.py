@@ -45,6 +45,10 @@ def _get_hf_mtp_num_layers(hf_config):
 
 def get_mcore_model_config(args, hf_config):
     kwargs = hf_to_mcore_config(hf_config)
+    llm_config = HfConfigFactory.get_text_config(hf_config)
+    n_routed_experts = getattr(llm_config, 'n_routed_experts', None)
+    if n_routed_experts is not None:
+        kwargs['num_moe_experts'] = n_routed_experts
     if getattr(args, 'mtp_num_layers', None) is None:
         mtp_num_layers = _get_hf_mtp_num_layers(hf_config)
         if mtp_num_layers is not None:
