@@ -5,7 +5,7 @@ from mcore_bridge import get_mcore_model as _get_mcore_model
 from mcore_bridge import hf_to_mcore_config
 from transformers.utils import is_torch_npu_available
 
-from swift.utils import get_logger
+from swift.utils import HfConfigFactory, get_logger
 
 logger = get_logger()
 
@@ -35,8 +35,20 @@ def _check_padding_free(args, config):
         args.padding_free = False
 
 
+def _get_hf_mtp_num_layers(hf_config):
+    llm_config = HfConfigFactory.get_text_config(hf_config)
+    for key in ['num_nextn_predict_layers', 'mtp_num_hidden_layers']:
+        value = getattr(llm_config, key, None)
+        if value is not None:
+            return value
+
+
 def get_mcore_model_config(args, hf_config):
     kwargs = hf_to_mcore_config(hf_config)
+    if getattr(args, 'mtp_num_layers', None) is None:
+        mtp_num_layers = _get_hf_mtp_num_layers(hf_config)
+        if mtp_num_layers is not None:
+            kwargs['mtp_num_layers'] = mtp_num_layers
     kwargs['mcore_model_type'] = args.megatron_model_meta.model_type
     kwargs['hf_config'] = hf_config
     for f in fields(ModelConfig):
