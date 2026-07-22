@@ -228,9 +228,24 @@ def _patch_mcore_bridge():
     require_version('mcore-bridge>=1.4.0', 'please install mcore-bridge via `pip install mcore-bridge -U`')
     import mcore_bridge
     from mcore_bridge import GPTBridge
+    from mcore_bridge.model.register import ModelLoader
     logger.info(f'mcore_bridge.__version__: {mcore_bridge.__version__}')
     if _use_accuracy_compatible_enabled():
         _patch_mcore_bridge_disable_te()
+    if not getattr(ModelLoader._replace_spec_dsa, '_swift_norm_accuracy_patch', False):
+        origin_replace_spec_dsa = ModelLoader._replace_spec_dsa
+
+        def replace_spec_dsa(self, layer_spec):
+            origin_replace_spec_dsa(self, layer_spec)
+            if not getattr(self.config, 'norm_accuracy_compatible', False):
+                return
+            from megatron.core.transformer.torch_norm import AccuracyCompatibleRMSNorm
+            dsa_spec = layer_spec.submodules.self_attention
+            dsa_spec.submodules.q_layernorm = AccuracyCompatibleRMSNorm
+            dsa_spec.submodules.kv_layernorm = AccuracyCompatibleRMSNorm
+
+        replace_spec_dsa._swift_norm_accuracy_patch = True
+        ModelLoader._replace_spec_dsa = replace_spec_dsa
     origin_save_weights = GPTBridge.save_weights
 
     def save_weights(
