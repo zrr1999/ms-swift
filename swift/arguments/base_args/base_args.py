@@ -346,6 +346,7 @@ class BaseArguments(GenerationArguments, QuantizeArguments, DataArguments, Templ
         res['revision'] = revision or self.model_revision
         res['task_type'] = task_type or self.task_type
         res['num_labels'] = num_labels or self.num_labels
+        res['processor_id_or_path'] = getattr(self, 'tokenizer_name_or_path', None)
 
         return get_model_processor(**res)
 

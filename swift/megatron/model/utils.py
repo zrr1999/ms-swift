@@ -35,6 +35,19 @@ def _check_padding_free(args, config):
         args.padding_free = False
 
 
+def _check_dsa_index_share_recompute(config):
+    """Reject activation replay that omits a DSA skip layer's source indexer."""
+    if (
+        config.experimental_attention_variant == 'dsa'
+        and (getattr(config, 'dsa_indexer_topk_freq', 1) or 1) > 1
+        and getattr(config, 'recompute_granularity', None) not in {None, 'none'}
+    ):
+        raise ValueError(
+            'DSA cross-layer top-k sharing is incompatible with activation recompute because a skip layer may be '
+            'replayed without its source computing layer. Set recompute_granularity=none.'
+        )
+
+
 def _get_hf_mtp_num_layers(hf_config):
     llm_config = HfConfigFactory.get_text_config(hf_config)
     for key in ['num_nextn_predict_layers', 'mtp_num_hidden_layers']:
@@ -93,6 +106,7 @@ def get_mcore_model_config(args, hf_config):
         setattr(config, 'use_flash_attn', True)
     _check_attention_backend(args, config)
     _check_padding_free(args, config)
+    _check_dsa_index_share_recompute(config)
     return config
 
 

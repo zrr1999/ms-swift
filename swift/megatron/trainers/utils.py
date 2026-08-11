@@ -1,5 +1,6 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
 import gc
+import os
 import torch
 from accelerate.utils import gather as hf_gather
 from accelerate.utils import gather_object as hf_gather_object
@@ -18,7 +19,7 @@ logger = get_logger()
 
 
 def get_batch_on_this_pp_rank(args, data, vp_stage=None):
-    if args.task_type == 'causal_lm':
+    if args.task_type == 'causal_lm' and not getattr(args, 'pretokenized_dataset', False):
         data['labels'] = torch.roll(data['labels'], -1, dims=-1)
         if 'loss_scale' in data:
             data['loss_scale'] = torch.roll(data['loss_scale'], -1, dims=-1)
@@ -400,6 +401,10 @@ def prepare_batch(args, data, vp_stage=None):
         if num_samples is not None:
             batch['packed_seq_params'].num_samples = num_samples
     batch = get_batch_on_this_cp_rank(args, batch)
+    if os.environ.get('MODEL_REPRO_INPUT_RECEIPT_PATH') and seq_lens is not None:
+        # Opt-in metadata for the owning-loader receipt. MegatronTrainer removes
+        # it before model(**data), so it cannot alter the numerical path.
+        batch['_model_repro_seq_lens'] = [int(length) for length in seq_lens]
     return batch
 
 

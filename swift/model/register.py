@@ -174,6 +174,7 @@ class ModelLoader(BaseModelLoader):
         auto_model_cls=None,
         return_dummy_model: bool = False,
         new_special_tokens: Optional[List[str]] = None,
+        processor_id_or_path: Optional[str] = None,
         model_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs,
     ):
@@ -197,6 +198,7 @@ class ModelLoader(BaseModelLoader):
         self.auto_tokenizer_cls = None
         self.return_dummy_model = return_dummy_model
         self.new_special_tokens = new_special_tokens
+        self.processor_id_or_path = processor_id_or_path
         self.model_kwargs = model_kwargs
         self.patch_offload = kwargs.pop('patch_offload', False)
         self.init_strategy = kwargs.get('init_strategy')
@@ -257,15 +259,16 @@ class ModelLoader(BaseModelLoader):
         return tokenizer
 
     def get_processor(self, model_dir: str, config: PretrainedConfig) -> Processor:
+        processor_dir = self.processor_id_or_path or model_dir
         auto_tokenizer_cls = self.auto_tokenizer_cls
         if auto_tokenizer_cls is None:
-            if os.path.exists(os.path.join(model_dir, 'preprocessor_config.json')) or os.path.exists(
-                    os.path.join(model_dir, 'processor_config.json')):
+            if os.path.exists(os.path.join(processor_dir, 'preprocessor_config.json')) or os.path.exists(
+                    os.path.join(processor_dir, 'processor_config.json')):
                 from transformers import AutoProcessor
                 auto_tokenizer_cls = AutoProcessor
             else:
                 auto_tokenizer_cls = AutoTokenizer
-        return auto_tokenizer_cls.from_pretrained(model_dir, trust_remote_code=self.default_trust_remote_code)
+        return auto_tokenizer_cls.from_pretrained(processor_dir, trust_remote_code=self.default_trust_remote_code)
 
     def get_model(self, model_dir: str, config: PretrainedConfig, processor: Processor,
                   model_kwargs) -> PreTrainedModel:
@@ -534,6 +537,7 @@ def get_model_processor(
     max_model_len: Optional[int] = None,
     auto_model_cls=None,
     new_special_tokens: Optional[List[str]] = None,
+    processor_id_or_path: Optional[str] = None,
     task_type: Literal['causal_lm', 'seq_cls', 'embedding', 'reranker', 'generative_reranker'] = None,
     num_labels: Optional[int] = None,
     problem_type: Literal['regression', 'single_label_classification', 'multi_label_classification'] = None,
@@ -568,6 +572,7 @@ def get_model_processor(
         max_model_len: Maximum sequence length the model can handle.
         auto_model_cls: Custom AutoModel class to use for loading (e.g., AutoModelForCausalLM).
         new_special_tokens: List of new special tokens to add to the tokenizer.
+        processor_id_or_path: Optional independent tokenizer or processor source.
         task_type: Task type for the model. Options: 'causal_lm', 'seq_cls', 'embedding', 'reranker',
             'generative_reranker'.
         num_labels: Number of labels for classification tasks.
@@ -625,6 +630,7 @@ def get_model_processor(
         auto_model_cls=auto_model_cls,
         return_dummy_model=return_dummy_model,
         new_special_tokens=new_special_tokens,
+        processor_id_or_path=processor_id_or_path,
         model_kwargs=model_kwargs,
         **kwargs)
     return loader.load()

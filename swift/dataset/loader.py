@@ -28,6 +28,7 @@ class DatasetLoader(BaseDatasetLoader):
         streaming: bool = False,
         hub_token: Optional[str] = None,
         strict: bool = False,
+        drop_empty_assistant_response: bool = False,
         download_mode: Literal['force_redownload', 'reuse_dataset_if_exists'] = 'reuse_dataset_if_exists',
         columns: Optional[Dict[str, str]] = None,
         remove_unused_columns: bool = True,
@@ -38,10 +39,23 @@ class DatasetLoader(BaseDatasetLoader):
         self.streaming = streaming
         self.hub_token = hub_token
         self.strict = strict
+        self.drop_empty_assistant_response = drop_empty_assistant_response
         self.download_mode = download_mode
         self.columns = columns
         self.remove_unused_columns = remove_unused_columns
         self.disable_auto_column_mapping = disable_auto_column_mapping
+
+    @staticmethod
+    def _has_nonempty_assistant_response(row: Dict) -> bool:
+        messages = row.get('messages') or []
+        return all(
+            message.get('role') != 'assistant' or not isinstance(message.get('content'), str)
+            or bool(message['content'].strip()) for message in messages)
+
+    def _filter_empty_assistant_responses(self, dataset: HfDataset) -> HfDataset:
+        if not self.drop_empty_assistant_response:
+            return dataset
+        return dataset.filter(self._has_nonempty_assistant_response)
 
     def _load_dataset_path(
         self,
@@ -66,7 +80,7 @@ class DatasetLoader(BaseDatasetLoader):
             enable_auto_mapping=not self.disable_auto_column_mapping)
         if self.remove_unused_columns:
             dataset = RowPreprocessor.remove_useless_columns(dataset)
-        return dataset
+        return self._filter_empty_assistant_responses(dataset)
 
     def _load_repo_dataset(
         self,
@@ -136,7 +150,7 @@ class DatasetLoader(BaseDatasetLoader):
                 enable_auto_mapping=not self.disable_auto_column_mapping)
             if self.remove_unused_columns:
                 dataset = RowPreprocessor.remove_useless_columns(dataset)
-            datasets.append(dataset)
+            datasets.append(self._filter_empty_assistant_responses(dataset))
         return self.concat_datasets(datasets)
 
     @staticmethod
@@ -236,6 +250,7 @@ def load_dataset(
     use_hf: Optional[bool] = None,
     hub_token: Optional[str] = None,
     strict: bool = False,
+    drop_empty_assistant_response: bool = False,
     download_mode: Literal['force_redownload', 'reuse_dataset_if_exists'] = 'reuse_dataset_if_exists',
     columns: Optional[Dict[str, str]] = None,  # columns_mapping
     remove_unused_columns: bool = True,
@@ -278,6 +293,8 @@ def load_dataset(
         hub_token: Authentication token for accessing private datasets on the hub. Default: None.
         strict: If True, raise exceptions when encountering malformed data rows.
             If False, skip invalid rows with warnings. Default: False.
+        drop_empty_assistant_response: Filter rows whose assistant response is an empty string.
+            Defaults to False.
         download_mode: How to handle existing cached datasets:
             - 'reuse_dataset_if_exists': Use cached version if available
             - 'force_redownload': Always download fresh copy
@@ -342,6 +359,7 @@ def load_dataset(
             streaming=streaming,
             hub_token=hub_token,
             strict=strict,
+            drop_empty_assistant_response=drop_empty_assistant_response,
             download_mode=download_mode,
             columns=columns,  # columns_mapping
             remove_unused_columns=remove_unused_columns,

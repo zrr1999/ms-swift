@@ -11,6 +11,16 @@ from .base import MegatronCallback
 logger = get_logger()
 
 
+def raw_loss_event(step, logs):
+    """Return an unrounded training-loss event, excluding evaluation metrics."""
+    raw_losses = {
+        key: value
+        for key, value in logs.items()
+        if key == 'loss' or (key.startswith('mtp_') and key.endswith('_loss'))
+    }
+    return {'step': step, **raw_losses} if raw_losses else None
+
+
 class PrintCallback(MegatronCallback):
 
     def __init__(self, trainer):
@@ -18,6 +28,7 @@ class PrintCallback(MegatronCallback):
         self.training_bar = None
         self.eval_bar = None
         self.jsonl_writer = None
+        self.raw_loss_writer = None
         self.is_write_rank = is_last_rank()
 
     def on_train_begin(self):
@@ -30,6 +41,10 @@ class PrintCallback(MegatronCallback):
         logging_path = os.path.join(self.args.output_dir, 'logging.jsonl')
         logger.info(f'logging_path: {logging_path}')
         self.jsonl_writer = JsonlWriter(logging_path, enable_async=True, write_on_rank='last')
+        raw_loss_path = os.environ.get('MODEL_REPRO_RAW_LOSS_PATH')
+        if raw_loss_path:
+            logger.info(f'raw_loss_path: {raw_loss_path}')
+            self.raw_loss_writer = JsonlWriter(raw_loss_path, write_on_rank='last')
 
     def on_train_end(self):
         self.training_bar.close()
@@ -63,6 +78,9 @@ class PrintCallback(MegatronCallback):
         memory = reduce_max_stat_across_model_parallel_group(torch.cuda.max_memory_reserved() / 1024**3)
         logs['memory(GiB)'] = round(memory, 2)
         logs['train_speed(s/it)'] = round(train_speed, 6)
+        raw_event = raw_loss_event(state.iteration, logs)
+        if self.raw_loss_writer is not None and raw_event is not None:
+            self.raw_loss_writer.append(raw_event)
         logs = {k: round(v, 8) if isinstance(v, float) else v for k, v in logs.items()}
         self.jsonl_writer.append(logs)
         if self.is_write_rank:

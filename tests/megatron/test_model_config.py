@@ -2,6 +2,7 @@ import torch
 from transformers import PretrainedConfig
 from types import SimpleNamespace
 
+from swift.megatron.init import _get_save_processor_id
 from swift.megatron.model import utils
 
 
@@ -35,6 +36,15 @@ def _patch_model_config(monkeypatch):
     monkeypatch.setattr(utils, 'fields',
                         lambda _: [SimpleNamespace(name='mtp_num_layers'),
                                    SimpleNamespace(name='num_moe_experts')])
+
+
+def test_save_processor_prefers_independent_tokenizer_source():
+    assert _get_save_processor_id(
+        SimpleNamespace(model_dir='/weights', tokenizer_name_or_path='/tokenizer')
+    ) == '/tokenizer'
+    assert _get_save_processor_id(
+        SimpleNamespace(model_dir='/weights', tokenizer_name_or_path=None)
+    ) == '/weights'
 
 
 def test_get_mcore_model_config_reads_mtp_num_layers_from_hf(monkeypatch):
@@ -71,3 +81,28 @@ def test_get_mcore_model_config_keeps_explicit_mtp_num_layers(monkeypatch):
     config = utils.get_mcore_model_config(_make_args(mtp_num_layers=2), hf_config)
 
     assert config.kwargs['mtp_num_layers'] == 2
+
+
+def test_dsa_index_share_allows_recompute_none():
+    config = SimpleNamespace(
+        experimental_attention_variant='dsa',
+        dsa_indexer_topk_freq=4,
+        recompute_granularity='none',
+    )
+
+    utils._check_dsa_index_share_recompute(config)
+
+
+def test_dsa_index_share_rejects_selective_recompute():
+    config = SimpleNamespace(
+        experimental_attention_variant='dsa',
+        dsa_indexer_topk_freq=4,
+        recompute_granularity='selective',
+    )
+
+    try:
+        utils._check_dsa_index_share_recompute(config)
+    except ValueError as error:
+        assert 'Set recompute_granularity=none' in str(error)
+    else:
+        raise AssertionError('expected DSA index sharing with selective recompute to fail closed')
