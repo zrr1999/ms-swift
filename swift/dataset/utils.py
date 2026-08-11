@@ -54,6 +54,30 @@ def sample_dataset(
     return dataset
 
 
+def validate_pretokenized_dataset(dataset: HfDataset, max_length: int) -> None:
+    """Validate fixed token rows without invoking a template or tokenizer."""
+    required = {'input_ids', 'labels', 'position_ids', 'lengths'}
+    if not isinstance(dataset, HfDataset):
+        raise TypeError('pretokenized_dataset requires a Hugging Face Dataset')
+    missing = required.difference(dataset.column_names)
+    if missing:
+        raise ValueError(f'pretokenized dataset missing columns: {sorted(missing)}')
+    for row in dataset:
+        input_ids = row['input_ids']
+        labels = row['labels']
+        position_ids = row['position_ids']
+        length_value = row['lengths']
+        length = max(length_value) if isinstance(length_value, list) else length_value
+        if not isinstance(length, int) or length <= 0 or length > max_length:
+            raise ValueError(f'pretokenized dataset has invalid length: {length}')
+        if len(input_ids) != length or len(labels) != length:
+            raise ValueError('pretokenized dataset has inconsistent input/label length')
+        if len(position_ids) != length:
+            raise ValueError('pretokenized dataset has inconsistent position_ids length')
+        if any(not isinstance(token, int) for token in input_ids + labels + position_ids):
+            raise TypeError('pretokenized dataset fields must contain integer token values')
+
+
 class LazyLLMDataset(Dataset):
     """This class if used to lazy tokenize the dataset, and skips bad ones when training"""
 

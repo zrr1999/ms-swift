@@ -5,7 +5,7 @@ from typing import List, Optional, Union
 
 from swift.arguments import SftArguments
 from swift.dataset import (AddLengthPreprocessor, DatasetLoader, EncodePreprocessor, IterablePackingDataset,
-                           LazyLLMDataset, PackingDataset)
+                           LazyLLMDataset, PackingDataset, validate_pretokenized_dataset)
 from swift.infer_engine import prepare_generation_config
 from swift.ray_utils import RayHelper
 from swift.sequence_parallel import sequence_parallel
@@ -49,6 +49,8 @@ class SwiftSft(SwiftPipeline, TunerMixin):
     def _prepare_model_tokenizer(self, **kwargs):
         args = self.args
         self.model, self.processor = args.get_model_processor(**kwargs)
+        if getattr(args, 'tokenizer_name_or_path', None):
+            logger.info(f'Using independent tokenizer_name_or_path: {args.tokenizer_name_or_path}')
         if args.sequence_parallel_size > 1:
             sequence_parallel.prepare(
                 args.sequence_parallel_size, model=self.model, tokenizer=self.processor, padding_free=args.padding_free)
@@ -124,6 +126,12 @@ class SwiftSft(SwiftPipeline, TunerMixin):
 
     def _post_process_datasets(self, datasets: List) -> List:
         args = self.args
+        if args.pretokenized_dataset:
+            for dataset in datasets:
+                if dataset is not None:
+                    validate_pretokenized_dataset(dataset, args.max_length)
+            logger.info('Using pretokenized cached dataset without template encoding.')
+            return datasets
         predict_with_generate = getattr(args, 'predict_with_generate', False)
 
         template = self.template

@@ -58,6 +58,8 @@ class DataArguments:
             Example: '{"text1": "query", "text2": "response"}'. Defaults to None.
         strict (bool): If `True`, raises an error on any problematic data row. If `False`, discards the problematic
             sample and continues. Typically used for debugging. Defaults to False.
+        drop_empty_assistant_response (bool): If `True`, filters SFT rows whose assistant response is an empty string.
+            Defaults to False.
         remove_unused_columns (bool): Whether to remove columns not used by the model. If `False`, extra columns are
             passed to the trainer's `compute_loss` function, which is useful for custom loss calculations.
             Defaults to True. Note: The default is `False` for GPRO.
@@ -76,6 +78,8 @@ class DataArguments:
     val_dataset: List[str] = field(default_factory=list)
     cached_dataset: List[str] = field(default_factory=list)
     cached_val_dataset: List[str] = field(default_factory=list)
+    pretokenized_dataset: bool = False
+    tokenizer_name_or_path: Optional[str] = None
     split_dataset_ratio: float = 0.
 
     data_seed: int = 42
@@ -91,6 +95,7 @@ class DataArguments:
     download_mode: Literal['force_redownload', 'reuse_dataset_if_exists'] = 'reuse_dataset_if_exists'
     columns: Optional[Union[dict, str]] = None
     strict: bool = False
+    drop_empty_assistant_response: bool = False
     remove_unused_columns: bool = True
     disable_auto_column_mapping: bool = False
     # Chinese name and English name
@@ -118,6 +123,8 @@ class DataArguments:
         self._init_custom_dataset_info()
         if isinstance(self.cached_dataset, str):
             self.cached_dataset = [self.cached_dataset]
+        if self.pretokenized_dataset and not self.cached_dataset:
+            raise ValueError('pretokenized_dataset requires cached_dataset')
         self._init_val_dataset_exists()
 
     def _init_val_dataset_exists(self):
@@ -138,6 +145,7 @@ class DataArguments:
             'download_mode': self.download_mode,
             'columns': self.columns,
             'strict': self.strict,
+            'drop_empty_assistant_response': self.drop_empty_assistant_response,
             'model_name': self.model_name,
             'model_author': self.model_author,
             'remove_unused_columns': self.remove_unused_columns,
