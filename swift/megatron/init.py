@@ -208,6 +208,18 @@ def _patch_mcore_bridge_disable_te():
     mcb_register.get_gpt_decoder_block_spec = _force_local_spec(mcb_register.get_gpt_decoder_block_spec)
     mcb_register.get_gpt_mtp_block_spec = _force_local_spec(mcb_register.get_gpt_mtp_block_spec)
 
+    # 1b) DSA is swapped in after the decoder spec via ModelLoader._replace_spec_dsa,
+    # which called _get_backend_spec_provider (TESpecProvider). That left TELinear /
+    # TENorm on DSA indexer + MLA while PaddleFleet HAVE_TE is False. E-259: remaining
+    # Torch DSA TE contaminated post_attn_norm. Force LocalSpecProvider instead.
+    from megatron.core.models.gpt import experimental_attention_variant_module_specs as _eav
+
+    def _local_backend_spec_provider(config):
+        from megatron.core.models.backends import LocalSpecProvider
+        return LocalSpecProvider()
+
+    _eav._get_backend_spec_provider = _local_backend_spec_provider
+
     # 2) persist_layer_norm=False on the model config (dataclass default is baked into
     #    __init__, so flip it on the instance via __post_init__).
     from mcore_bridge.config.model_config import ModelConfig as McbModelConfig

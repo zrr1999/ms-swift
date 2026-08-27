@@ -93,6 +93,20 @@ def test_dsa_index_share_allows_recompute_none():
     utils._check_dsa_index_share_recompute(config)
 
 
+def test_dsa_backend_forced_to_local_spec_when_accuracy_compatible(monkeypatch):
+    from megatron.core.models.backends import LocalSpecProvider
+    from megatron.core.models.gpt import experimental_attention_variant_module_specs as eav
+
+    import swift.megatron.init as init
+
+    monkeypatch.setattr(init, '_use_accuracy_compatible_enabled', lambda: True)
+    init._patch_mcore_bridge_disable_te()
+    provider = eav._get_backend_spec_provider(SimpleNamespace())
+    assert isinstance(provider, LocalSpecProvider)
+    assert hasattr(provider, 'linear')
+    assert provider.linear() is not provider.column_parallel_linear()
+
+
 def test_dsa_index_share_rejects_selective_recompute():
     config = SimpleNamespace(
         experimental_attention_variant='dsa',
