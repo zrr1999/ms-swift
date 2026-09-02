@@ -252,6 +252,46 @@ class BaseMegatronTrainer(ABC):
         padding_to = get_padding_to(self.args)
         logger.info(f'padding_to: {padding_to}')
         data_collator = partial(data_collator, padding_to=padding_to)
+        align_len = os.environ.get('MODEL_REPRO_ALIGN_LEN')  # e.g. "61"
+        if align_len:
+            align_len = int(align_len)
+
+            def _align_collate(batch):
+                out = data_collator(batch)
+                pad_id = int(os.environ.get('MODEL_REPRO_ALIGN_PAD_ID', '154820'))
+                if isinstance(out, dict) and 'input_ids' in out:
+                    ids = out['input_ids']
+                    n = ids.shape[-1]
+                    if n < align_len:
+                        import torch
+                        pad = torch.full_like(ids[..., :1], pad_id).expand(*ids.shape[:-1], align_len - n)
+                        out['input_ids'] = torch.cat([ids, pad], dim=-1)
+                        if 'labels' in out and out['labels'] is not None:
+                            labels = out['labels']
+                            ignore = out.get('ignore_index', -100)
+                            lab_pad = torch.full(
+                                (*labels.shape[:-1], align_len - n), ignore, dtype=labels.dtype
+                            )
+                            out['labels'] = torch.cat([labels, lab_pad], dim=-1)
+                        # Pad every other field whose last dim == the seq length.
+                        for key in list(out.keys()):
+                            if key in ('input_ids', 'labels'):
+                                continue
+                            val = out[key]
+                            if isinstance(val, torch.Tensor) and val.ndim >= 1 and val.shape[-1] == n:
+                                if val.dtype == torch.bool:
+                                    fill = True
+                                elif val.dtype in (torch.long, torch.int32, torch.int64):
+                                    fill = 0
+                                else:
+                                    fill = 0
+                                padv = torch.full(
+                                    (*val.shape[:-1], align_len - n), fill, dtype=val.dtype
+                                )
+                                out[key] = torch.cat([val, padv], dim=-1)
+                return out
+
+            return _align_collate
         return data_collator
 
     def cyclic_iter(self, iterable, use_origin_cyclic: bool = False):
@@ -773,9 +813,20 @@ class BaseMegatronTrainer(ABC):
         state = self.state
         args.consumed_train_samples = state.consumed_train_samples
         iteration = state.iteration
-        output_dir = os.path.join(args.output_dir, f'checkpoint-{iteration}')
+        formal_checkpoint_dir = os.environ.get('MODEL_REPRO_CHECKPOINT_DIR')
+        if formal_checkpoint_dir and iteration == args.train_iters:
+            output_dir = os.path.abspath(os.path.expanduser(formal_checkpoint_dir))
+        else:
+            output_dir = os.path.join(args.output_dir, f'checkpoint-{iteration}')
         os.makedirs(output_dir, exist_ok=True)
-        args_path = os.path.join(os.path.dirname(output_dir), 'args.json')
+        # args.json always lives directly under args.output_dir. In the default path
+        # output_dir is args.output_dir/checkpoint-<iter>, so dirname(output_dir) happens
+        # to equal args.output_dir; with the MODEL_REPRO_CHECKPOINT_DIR override above,
+        # output_dir is an arbitrary absolute path and dirname(output_dir) points
+        # somewhere unrelated, making copy_path raise FileNotFoundError and losing the
+        # whole checkpoint. Read it from args.output_dir directly, which is correct in
+        # both paths.
+        args_path = os.path.join(args.output_dir, 'args.json')
         self.copy_path(args_path, os.path.join(output_dir, 'args.json'))
         if args.save_safetensors and args.no_save_optim:
             model = []
@@ -908,6 +959,121 @@ class BaseMegatronTrainer(ABC):
                 metrics[k] = v if isinstance(v, torch.Tensor) else torch.tensor(v)
             self.eval_metrics.reset()
 
+    def _write_gradient_contract(self):
+        """Dump per-parameter gradient hashes right before the optimizer step.
+
+        Symmetric with the paddle-side receipt written by
+        ``paddleformers/cli/train/sft/workflow.py`` in ``on_optimizer_begin``, so a
+        step-N backward pass can be compared parameter by parameter. Records
+        ``main_grad`` when the fp32 gradient buffer exists (the usual bf16 path) and
+        falls back to ``grad``.
+        """
+        import hashlib
+        import json
+        import os
+
+        import torch
+
+        def _grad_record(tensor):
+            tensor = tensor.detach().contiguous().to(device='cpu')
+            digest = hashlib.sha256(tensor.contiguous().view(torch.uint8).numpy().tobytes()).hexdigest()
+            flat = tensor.to(torch.float64).reshape(-1)
+            record = {
+                'shape': list(tensor.shape),
+                'dtype': str(tensor.dtype),
+                'numel': tensor.numel(),
+                'sha256': digest,
+                # Shape-independent magnitude summary, so a gradient whose layout
+                # differs between frameworks can still be compared numerically.
+                'sumsq': float((flat * flat).sum().item()),
+                'absmax': float(flat.abs().max().item()) if flat.numel() else 0.0,
+                'abssum': float(flat.abs().sum().item()),
+                'nonzero': int((flat != 0).sum().item()),
+            }
+            if tensor.ndim == 2:
+                record['transpose_sha256'] = hashlib.sha256(
+                    tensor.transpose(0, 1).contiguous().view(torch.uint8).numpy().tobytes()
+                ).hexdigest()
+            return record
+
+        output_dir = os.environ.get('MODEL_REPRO_GRAD_RECEIPT_DIR')
+        if not output_dir:
+            return
+        step = int(self.state.global_step) + 1 if hasattr(self, 'state') else 1
+        want = os.environ.get('MODEL_REPRO_GRAD_RECEIPT_STEPS')
+        if want and str(step) not in {piece.strip() for piece in want.split(',')}:
+            return
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        gradients = []
+        for chunk_index, model in enumerate(self.unwrapped_models):
+            for name, param in model.named_parameters():
+                grad = getattr(param, 'main_grad', None)
+                source = 'main_grad'
+                if grad is None:
+                    grad = param.grad
+                    source = 'grad'
+                if grad is None:
+                    gradients.append({'chunk': chunk_index, 'name': name, 'source': 'none'})
+                    continue
+                gradients.append({
+                    'chunk': chunk_index,
+                    'name': name,
+                    'source': source,
+                    # Expert-parallel params live in a separate DP group and are not
+                    # touched by the sequence-parallel TP all-reduce, so record both
+                    # flags to keep the paddle comparison honest about what was reduced.
+                    'expert_parallel': not getattr(param, 'allreduce', True),
+                    'sequence_parallel': bool(getattr(param, 'sequence_parallel', False)),
+                    **_grad_record(grad),
+                })
+        try:
+            from megatron.core import parallel_state as _ps
+            groups = {
+                'tp': _ps.get_tensor_model_parallel_world_size(),
+                'pp': _ps.get_pipeline_model_parallel_world_size(),
+                'dp_cp': _ps.get_data_parallel_world_size(with_context_parallel=True),
+                'expt_tp': _ps.get_expert_tensor_parallel_world_size(),
+                'expt_dp': _ps.get_expert_data_parallel_world_size(),
+                'expt_mp': _ps.get_expert_model_parallel_world_size(),
+            }
+        except Exception as exc:
+            groups = {'error': repr(exc)}
+        payload = {
+            'schema': 'glm52-gradient-inventory/v1',
+            'framework': 'torch',
+            'rank': rank,
+            'step': step,
+            'parallel_groups': groups,
+            'gradients': gradients,
+            'gradient_count': len(gradients),
+        }
+        os.makedirs(output_dir, exist_ok=True)
+        path = os.path.join(output_dir, f'rank{rank}_step{step}.json')
+        with open(path, 'w', encoding='utf-8') as stream:
+            json.dump(payload, stream, ensure_ascii=False, indent=2, sort_keys=True)
+            stream.write('\n')
+
+        # Hashes alone cannot separate a scale factor from a genuine numerical
+        # difference, so a few small parameters are dumped elementwise.
+        match = os.environ.get('MODEL_REPRO_GRAD_DUMP_MATCH')
+        if match:
+            needles = [piece.strip() for piece in match.split(',') if piece.strip()]
+            for chunk_index, model in enumerate(self.unwrapped_models):
+                for name, param in model.named_parameters():
+                    if not any(needle in name for needle in needles):
+                        continue
+                    grad = getattr(param, 'main_grad', None)
+                    if grad is None:
+                        grad = param.grad
+                    if grad is None:
+                        continue
+                    array = grad.detach().to(torch.float32).cpu().numpy()
+                    safe = name.replace('/', '_')
+                    base = os.path.join(output_dir, f'rank{rank}_step{step}_c{chunk_index}_{safe}')
+                    array.tofile(base + '.bin')
+                    with open(base + '.json', 'w', encoding='utf-8') as stream:
+                        json.dump({'name': name, 'shape': list(array.shape), 'dtype': 'float32'}, stream)
+
     def _replace_data_iterator(self, data_iterator):
         return data_iterator
 
@@ -932,6 +1098,8 @@ class BaseMegatronTrainer(ABC):
             micro_batch_size=args.micro_batch_size,
             forward_only=False,
         )
+
+        self._write_gradient_contract()
 
         update_successful, grad_norm, _ = self.optimizer.step()
         update_successful = logical_and_across_model_parallel_group(update_successful)
@@ -1020,7 +1188,39 @@ class BaseMegatronTrainer(ABC):
 
     def get_batch(self, data_iterator, vp_stage=None):
         """Generate a batch."""
-        return self._prepare_batch(next(data_iterator), vp_stage)
+        batch = self._prepare_batch(next(data_iterator), vp_stage)
+        import os as _os_mod
+
+        _os_mod.environ["MODEL_REPRO_STEP"] = str(self.state.iteration if hasattr(self.state, "iteration") else 0)
+        _dump = os.environ.get("MODEL_REPRO_INPUT_DUMP_DIR")
+        if _dump:
+            import torch.distributed as _dist
+            import hashlib as _hashlib
+
+            _rk = _dist.get_rank() if _dist.is_initialized() else 0
+            _mb = self.state.iteration if hasattr(self.state, "iteration") else 0
+            _ids = batch.get("input_ids")
+            if _ids is not None:
+                _arr = _ids.detach().cpu().numpy()
+                os.makedirs(_dump, exist_ok=True)
+                _arr.tofile(os.path.join(_dump, f"torch_input_ids_step{_mb}_rank{_rk}.bin"))
+                _h = _hashlib.md5(_arr.tobytes()).hexdigest()
+                print(
+                    f"[INPUT-DUMP] step{_mb} rank{_rk} ids shape={tuple(_arr.shape)} "
+                    f"md5={_h} len={_arr.size}",
+                    flush=True,
+                )
+                for _k in ("labels", "position_ids"):
+                    _t = batch.get(_k)
+                    if _t is not None:
+                        _a2 = _t.detach().cpu().numpy()
+                        _a2.tofile(os.path.join(_dump, f"torch_{_k}_step{_mb}_rank{_rk}.bin"))
+                        print(
+                            f"[INPUT-DUMP] step{_mb} rank{_rk} {_k} shape={tuple(_a2.shape)} "
+                            f"md5={_hashlib.md5(_a2.tobytes()).hexdigest()}",
+                            flush=True,
+                        )
+        return batch
 
     def _collect_config_info(self) -> Dict[str, str]:
         """

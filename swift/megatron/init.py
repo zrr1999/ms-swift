@@ -207,6 +207,21 @@ def _patch_mcore_bridge_disable_te():
     mcb_register.get_gpt_decoder_block_spec = _force_local_spec(mcb_register.get_gpt_decoder_block_spec)
     mcb_register.get_gpt_mtp_block_spec = _force_local_spec(mcb_register.get_gpt_mtp_block_spec)
 
+    # 1b) DSA attention is swapped in AFTER the decoder spec via
+    # ModelLoader._replace_spec_dsa, which called _get_backend_spec_provider
+    # (hard-requires transformer_impl==transformer_engine -> TESpecProvider).
+    # That left TELinear / TENorm on DSA indexer + MLA projections while
+    # PaddleFleet HAVE_TE is False. Force LocalSpecProvider instead.
+    # E-259: Paddle has no TE; remaining Torch DSA TE contaminated post_attn_norm
+    # (5/30 vs 29/30 once disabled). Alignment requires TE off on this side.
+    from megatron.core.models.gpt import experimental_attention_variant_module_specs as _eav
+
+    def _local_backend_spec_provider(config):
+        from megatron.core.models.backends import LocalSpecProvider
+        return LocalSpecProvider()
+
+    _eav._get_backend_spec_provider = _local_backend_spec_provider
+
     # 2) persist_layer_norm=False on the model config (dataclass default is baked into
     #    __init__, so flip it on the instance via __post_init__).
     from mcore_bridge.config.model_config import ModelConfig as McbModelConfig
@@ -241,7 +256,73 @@ def _patch_mcore_bridge_disable_te():
         return hf_state_dict
 
     McbGPTBridge._set_layer_attn = _set_layer_attn
-    logger.info('mcore_bridge patched for TE-off alignment (local spec, persist_layer_norm=False, input_layernorm map)')
+
+    # 4) local-spec dense-MLP norm key mapping: with the local (non-TE) spec the
+    #    dense MLP is `ColumnParallelLinear` + separate `pre_mlp_layernorm`
+    #    (no fused `linear_fc1.layer_norm_weight`); route that key accordingly.
+    def _set_layer_mlp(self, mg_layer, hf_state_dict, layer_idx, to_mcore, is_mtp=False):
+        mg_mlp = None if mg_layer is None else mg_layer.mlp
+        is_moe = True if mg_mlp is not None and hasattr(mg_mlp, 'experts') else False
+        if not to_mcore:
+            is_moe = torch.tensor([is_moe], dtype=torch.bool, device='cuda')
+            if self.pp_size > 1:
+                dist.all_reduce(is_moe, group=self.pp_group)
+        if is_moe:
+            hf_state_dict.update(
+                self._set_moe_state(
+                    mg_mlp, hf_state_dict, f'{self.hf_mlp_prefix}.', layer_idx, to_mcore, is_mtp=is_mtp))
+            self._set_state_dict(mg_layer, 'pre_mlp_layernorm.weight', hf_state_dict,
+                                 self.hf_post_attention_layernorm_key, to_mcore)
+        else:
+            hf_state_dict.update(
+                self._set_mlp_state(mg_mlp, hf_state_dict, f'{self.hf_mlp_prefix}.', layer_idx, to_mcore))
+            # Local spec: dense MLP is unfused (separate pre_mlp_layernorm).
+            mg_fc1 = None if mg_layer is None else getattr(getattr(mg_layer, 'mlp', None), 'linear_fc1', None)
+            fused_norm_weight = getattr(mg_fc1, 'layer_norm_weight', None)
+            if fused_norm_weight is None:
+                self._set_state_dict(mg_layer, 'pre_mlp_layernorm.weight', hf_state_dict,
+                                     self.hf_post_attention_layernorm_key, to_mcore)
+            else:
+                self._set_state_dict(mg_layer, 'mlp.linear_fc1.layer_norm_weight', hf_state_dict,
+                                     self.hf_post_attention_layernorm_key, to_mcore)
+        return hf_state_dict
+
+    McbGPTBridge._set_layer_mlp = _set_layer_mlp
+    logger.info('mcore_bridge patched for TE-off alignment (local spec, persist_layer_norm=False, input_layernorm+mlp-norm map)')
+
+
+def _patch_mcore_bridge_rmsnorm_capture():
+    """Diagnostic: install the E-051R capture hook on the *runtime* layer class.
+
+    ``mcore_bridge.model.modules.transformer_layer.TransformerLayer`` subclasses
+    Megatron's ``TransformerLayer`` but calls ``super(McoreTransformerLayer, self)``,
+    deliberately skipping Megatron's ``__init__`` and building ``self.input_layernorm``
+    itself. A hook placed in Megatron's ``__init__`` is therefore never reached, so it
+    must be attached to the subclass instead.
+
+    Fully env-gated: with ``MODEL_REPRO_RMSNORM_ARCHIVE_DIR`` unset this wrapper is not
+    installed at all and behaviour is byte-for-byte unchanged.
+    """
+    if not os.environ.get("MODEL_REPRO_RMSNORM_ARCHIVE_DIR"):
+        return
+
+    from mcore_bridge.model.modules import transformer_layer as mcb_layer
+
+    target = mcb_layer.TransformerLayer
+    if getattr(target.__init__, "_repro_rmsnorm_capture_patch", False):
+        return
+
+    origin_init = target.__init__
+
+    def __init__(self, *args, **kwargs):
+        origin_init(self, *args, **kwargs)
+        from model_repro_rmsnorm_capture import install as _repro_rmsnorm_install
+
+        _repro_rmsnorm_install(self)
+
+    __init__._repro_rmsnorm_capture_patch = True
+    target.__init__ = __init__
+    logger.info("[rmsnorm-capture] installed on mcore_bridge TransformerLayer")
 
 
 def _patch_mcore_bridge():
@@ -260,16 +341,29 @@ def _patch_mcore_bridge():
 
         def replace_spec_dsa(self, layer_spec):
             origin_replace_spec_dsa(self, layer_spec)
-            if not getattr(self.config, "norm_accuracy_compatible", False):
-                return
             from megatron.core.transformer.torch_norm import WrappedTorchNorm
 
             dsa_spec = layer_spec.submodules.self_attention
-            dsa_spec.submodules.q_layernorm = WrappedTorchNorm
-            dsa_spec.submodules.kv_layernorm = WrappedTorchNorm
+            if getattr(self.config, "norm_accuracy_compatible", False):
+                dsa_spec.submodules.q_layernorm = WrappedTorchNorm
+                dsa_spec.submodules.kv_layernorm = WrappedTorchNorm
+            # Indexer k_norm is LayerNorm (not RMSNorm). TESpecProvider used TENorm;
+            # local path uses WrappedTorchNorm / FusedLayerNorm. Force torch.nn.LayerNorm
+            # so this site stays off TE even if origin_replace_spec_dsa still saw TE.
+            indexer = getattr(
+                getattr(dsa_spec.submodules.core_attention, "submodules", None),
+                "indexer",
+                None,
+            )
+            if indexer is not None and getattr(indexer, "submodules", None) is not None:
+                # DSA indexer k_norm is LayerNorm: dsa.py copies
+                # config.normalization='LayerNorm' before build_module, so
+                # WrappedTorchNorm instantiates torch.nn.LayerNorm, not RMSNorm.
+                indexer.submodules.k_norm = WrappedTorchNorm
 
         replace_spec_dsa._swift_norm_accuracy_patch = True
         ModelLoader._replace_spec_dsa = replace_spec_dsa
+    _patch_mcore_bridge_rmsnorm_capture()
     origin_save_weights = GPTBridge.save_weights
 
     def save_weights(
@@ -382,12 +476,125 @@ def _patch_mcore_bridge():
     GPTBridge.save_weights = save_weights
 
 
+def _patch_explicit_rmsnorm():
+    """Candidate: model EXACT FP32 RMSNorm under MODEL_REPRO_RMS_EXPLICIT=1.
+
+    E-056/E-058 proved under the current source that every q/kv projection GEMM is
+    bit-identical between torch-F.linear and paddle IF the RMSNorm output uses the
+    explicit FP32 formula (x_fp32 * rsqrt(mean(x_fp32^2)+eps) * w_fp32, RNE cast to
+    bf16); torch.nn.RMSNorm (fused native) deviates by 1 ULP at 3 token-18 elements,
+    which then amplifies through the DSA attention core into the loss gap.
+
+    The full model uses BOTH torch.nn.RMSNorm (DSA/MTP norms via WrappedTorchNorm)
+    and te.pytorch.RMSNorm (base layer input norms); override both under the gate so
+    every RMSNorm in the graph uses the explicit formula. This is a DRAFT hypothesis
+    probe, NOT a landed production numerical patch: fully env-gated, recorded as a
+    source dirty diff, and revertible by unsetting MODEL_REPRO_RMS_EXPLICIT.
+    """
+    if os.environ.get("MODEL_REPRO_RMS_EXPLICIT", "0") != "1":
+        return
+    import torch as _torch
+
+    def _explicit_forward(self, x):
+        # Exact mirror of the E-056 reference formula proven to match paddle native:
+        #   mean_sq in FP64 -> cast FP32; rstd = rsqrt(mean_sq + eps) fp32;
+        #   y = (x_fp32 * rstd * w_fp32) cast to bf16 (RNE).
+        # Constrained to x.ndim >= 2 (hidden always on last dim); keep fp64 only
+        # for the mean reduction as the reference does.
+        x64 = x.double()
+        mean_sq = (x64 * x64).mean(dim=-1, keepdim=True).float()
+        rstd = _torch.rsqrt(mean_sq + self.eps)
+        x32 = x.float()
+        y = (x32 * rstd * self.weight.float()).to(x.dtype)
+        return y
+
+    original_torch_forward = _torch.nn.RMSNorm.forward
+    _torch.nn.RMSNorm.forward = _explicit_forward
+    _torch.nn.RMSNorm._repro_explicit_forward_patched = True
+    _torch.nn.RMSNorm._repro_original_forward = original_torch_forward
+    logger.info(
+        "[repro-explicit-rmsnorm] patched torch.nn.RMSNorm.forward -> explicit FP32 formula "
+        "(hypothesis probe; revert by unsetting MODEL_REPRO_RMS_EXPLICIT)"
+    )
+    try:
+        import transformer_engine.pytorch as te_pytorch
+    except Exception as exc:  # pragma: no cover - TE may be absent
+        logger.warning(f"[repro-explicit-rmsnorm] TE not available: {exc!r}")
+        return
+    rms_cls = getattr(te_pytorch, "RMSNorm", None)
+    if rms_cls is None:
+        return
+    original_te_forward = rms_cls.forward
+    rms_cls.forward = _explicit_forward
+    rms_cls._repro_explicit_forward_patched = True
+    rms_cls._repro_original_forward = original_te_forward
+    logger.info(
+        "[repro-explicit-rmsnorm] patched te.pytorch.RMSNorm.forward -> explicit FP32 formula "
+        "(hypothesis probe; revert by unsetting MODEL_REPRO_RMS_EXPLICIT)"
+    )
+
+
+def _patch_eager_repro_linears():
+    """Candidate: route TE Linear forward through torch F.linear (env-gated).
+
+    E-057/E-058 proved with the current source that torch F.linear(q/kv weights)
+    reproduces paddle's projection records bit-for-bit (0/116736 etc.) given
+    bit-identical inputs. This probe routes TE's fused Linear kernels through the
+    same F.linear math so the q/kv projection kernels match paddle's. Only when
+    MODEL_REPRO_LINEAR_EAGER=1; DRAFT hypothesis probe, not a landed patch.
+    """
+    if os.environ.get("MODEL_REPRO_LINEAR_EAGER", "0") != "1":
+        return
+    import torch as _torch
+    try:
+        import transformer_engine.pytorch as te_pytorch
+    except Exception as exc:  # pragma: no cover
+        logger.warning(f"[repro-eager-linear] TE not available: {exc!r}")
+        return
+    linear_cls = getattr(te_pytorch, "Linear", None)
+    if linear_cls is None:
+        return
+    if getattr(linear_cls, "_repro_eager_forward_patched", False):
+        return
+    original_forward = linear_cls.forward
+
+    def eager_forward(self, *args, **kwargs):
+        parallel_mode = getattr(self, "parallel_mode", "duplicated")
+        if not getattr(eager_forward, "_diag_seen", None):
+            eager_forward._diag_seen = set()
+        key = f"{type(self).__name__}|pm={parallel_mode}|{self.__class__.__module__}"
+        if key not in eager_forward._diag_seen:
+            eager_forward._diag_seen.add(key)
+            logger.info(f"[repro-eager-linear] diag {key}")
+        if parallel_mode in ("column", "row"):
+            return original_forward(self, *args, **kwargs)
+        inp = args[0] if args else kwargs.get("input")
+        if inp is None:
+            return original_forward(self, *args, **kwargs)
+        if hasattr(self, "weight") and self.weight is not None:
+            w = self.weight
+            out = _torch.nn.functional.linear(inp, w, None)
+            if hasattr(self, "bias") and self.bias is not None and getattr(self.bias, "numel", lambda: 0)() > 0:
+                out = out + self.bias
+            return out
+        return original_forward(self, *args, **kwargs)
+
+    linear_cls.forward = eager_forward
+    linear_cls._repro_eager_forward_patched = True
+    logger.info(
+        "[repro-eager-linear] patched TE Linear.forward -> torch F.linear "
+        "(hypothesis probe; revert by unsetting MODEL_REPRO_LINEAR_EAGER)"
+    )
+
+
 def init_megatron_env():
     os.environ.pop("VLLM_USE_MODELSCOPE", None)
     logging_level = logging.root.level
     _patch_unified_memory()
     _patch_transformers_output_recorder()
     _patch_mcore_bridge()
+    _patch_explicit_rmsnorm()
+    _patch_eager_repro_linears()
     _patch__batched_p2p_ops()
     logging.root.setLevel(logging_level)  # revert logger level
     try:

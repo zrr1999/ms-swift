@@ -97,6 +97,9 @@ class MegatronPretrainingRandomSampler:
         if self.lengths is not None:
             self.lengths = [max(length) if isinstance(length, list) else length for length in self.lengths]
         self.micro_batch_times_data_parallel_size = self.micro_batch_size * data_parallel_size
+        import os as _osdbg
+        if _osdbg.environ.get("MODEL_REPRO_SAMPLER_DEBUG", "0") == "1":
+            print(f"[SMPLDBG] consumed_samples={consumed_samples} total={total_samples} mbs={micro_batch_size} dp={data_parallel_rank}/{data_parallel_size} shuffle={shuffle}", flush=True)
         self.last_batch_size = self.total_samples % self.micro_batch_times_data_parallel_size
 
         # Sanity checks.

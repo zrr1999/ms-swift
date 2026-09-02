@@ -609,6 +609,7 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
     overlap_param_gather: bool = False
     overlap_param_gather_with_optimizer_step: bool = False
     align_grad_reduce: bool = True
+    deterministic_mode: bool = False
     # Eagerly create NCCL communicators before the training loop to avoid the lazy
     # first-use allocation hitting the iteration-1 memory peak (Failed to CUDA calloc async).
     nccl_comm_warmup: bool = False

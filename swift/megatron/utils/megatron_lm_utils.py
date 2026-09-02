@@ -83,7 +83,32 @@ def _initialize_mpu(args):
                         f'EP: {args.expert_model_parallel_size}, ETP: {args.expert_tensor_parallel_size}')
 
 
+def configure_deterministic_mode(args):
+    """Enable the same fail-closed deterministic contract as Megatron-LM training."""
+    if not getattr(args, 'deterministic_mode', False):
+        return
+    attention_backend = getattr(args, 'attention_backend', '')
+    attention_backend = getattr(attention_backend, 'name', str(attention_backend)).lower()
+    if attention_backend == 'flash':
+        raise ValueError('Flash attention cannot be used in deterministic mode.')
+    if getattr(args, 'cross_entropy_loss_fusion', False):
+        raise ValueError('Cross entropy fusion cannot be used in deterministic mode.')
+    nccl_algo = os.environ.get('NCCL_ALGO')
+    allowed_nccl_algorithms = {'Tree', 'Ring', 'CollnetDirect', 'CollnetChain', '^NVLS'}
+    if nccl_algo not in allowed_nccl_algorithms:
+        raise ValueError(
+            f'NCCL_ALGO must be explicitly set to one of {sorted(allowed_nccl_algorithms)} '
+            'in deterministic mode.'
+        )
+    torch.use_deterministic_algorithms(True)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    logger.info(f'Deterministic mode enabled with NCCL_ALGO={nccl_algo}.')
+
+
 def initialize_megatron(args):
+    configure_deterministic_mode(args)
+
     # Pytorch distributed.
     _initialize_mpu(args)
 

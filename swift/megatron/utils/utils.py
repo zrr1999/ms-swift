@@ -210,6 +210,12 @@ def get_padding_to(args):
     padding_to = None
     if args.tensor_model_parallel_size > 1 and args.sequence_parallel:
         padding_to = args.tensor_model_parallel_size
+        # E-126: SP also interleaves the sequence across TP ranks at 2x; without
+        # this the batch pads to ceil(57/2)*2=58 while PaddleFleet's collator
+        # pads to 60 (57 -> [TP*SP=4] -> 60). The frozen profile expects both
+        # sides on the same 60-token carrier (30/rank). Regression in ms-swift
+        # after the e115-era alignment work; restoring the 2x factor.
+        padding_to = padding_to * 2
     if args.context_parallel_size > 1:
         padding_to = (padding_to or 1) * args.context_parallel_size
     origin_padding_to = padding_to
