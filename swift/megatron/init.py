@@ -254,7 +254,40 @@ def _patch_mcore_bridge_disable_te():
         return hf_state_dict
 
     McbGPTBridge._set_layer_attn = _set_layer_attn
-    logger.info('mcore_bridge patched for TE-off alignment (local spec, persist_layer_norm=False, input_layernorm map)')
+
+    # 4) local-spec dense-MLP norm key mapping: with the local (non-TE) spec the
+    #    dense MLP is `ColumnParallelLinear` + separate `pre_mlp_layernorm`
+    #    (no fused `linear_fc1.layer_norm_weight`); route that key accordingly.
+    def _set_layer_mlp(self, mg_layer, hf_state_dict, layer_idx, to_mcore, is_mtp=False):
+        mg_mlp = None if mg_layer is None else mg_layer.mlp
+        is_moe = True if mg_mlp is not None and hasattr(mg_mlp, 'experts') else False
+        if not to_mcore:
+            is_moe = torch.tensor([is_moe], dtype=torch.bool, device='cuda')
+            if self.pp_size > 1:
+                dist.all_reduce(is_moe, group=self.pp_group)
+        if is_moe:
+            hf_state_dict.update(
+                self._set_moe_state(
+                    mg_mlp, hf_state_dict, f'{self.hf_mlp_prefix}.', layer_idx, to_mcore, is_mtp=is_mtp))
+            self._set_state_dict(mg_layer, 'pre_mlp_layernorm.weight', hf_state_dict,
+                                 self.hf_post_attention_layernorm_key, to_mcore)
+        else:
+            hf_state_dict.update(
+                self._set_mlp_state(mg_mlp, hf_state_dict, f'{self.hf_mlp_prefix}.', layer_idx, to_mcore))
+            mg_fc1 = None if mg_layer is None else getattr(getattr(mg_layer, 'mlp', None), 'linear_fc1', None)
+            fused_norm_weight = getattr(mg_fc1, 'layer_norm_weight', None)
+            if fused_norm_weight is None:
+                self._set_state_dict(mg_layer, 'pre_mlp_layernorm.weight', hf_state_dict,
+                                     self.hf_post_attention_layernorm_key, to_mcore)
+            else:
+                self._set_state_dict(mg_layer, 'mlp.linear_fc1.layer_norm_weight', hf_state_dict,
+                                     self.hf_post_attention_layernorm_key, to_mcore)
+        return hf_state_dict
+
+    McbGPTBridge._set_layer_mlp = _set_layer_mlp
+    logger.info(
+        'mcore_bridge patched for TE-off alignment (local spec, persist_layer_norm=False, input_layernorm+mlp-norm map)'
+    )
 
 
 def _patch_mcore_bridge():

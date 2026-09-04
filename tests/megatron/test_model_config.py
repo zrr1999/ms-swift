@@ -1,8 +1,10 @@
+import inspect
+
 import torch
 from transformers import PretrainedConfig
 from types import SimpleNamespace
 
-from swift.megatron.init import _get_save_processor_id
+from swift.megatron.init import _get_save_processor_id, _patch_mcore_bridge_disable_te
 from swift.megatron.model import utils
 
 
@@ -105,6 +107,13 @@ def test_dsa_backend_forced_to_local_spec_when_accuracy_compatible(monkeypatch):
     assert isinstance(provider, LocalSpecProvider)
     assert hasattr(provider, 'linear')
     assert provider.linear() is not provider.column_parallel_linear()
+
+
+def test_local_spec_mlp_norm_maps_pre_mlp_layernorm_when_unfused():
+    source = inspect.getsource(_patch_mcore_bridge_disable_te)
+    assert "fused_norm_weight is None" in source
+    assert "pre_mlp_layernorm.weight" in source
+    assert "mlp.linear_fc1.layer_norm_weight" in source
 
 
 def test_dsa_index_share_rejects_selective_recompute():
