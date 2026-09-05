@@ -1,5 +1,5 @@
 import inspect
-
+import math
 import torch
 from transformers import PretrainedConfig
 from types import SimpleNamespace
@@ -42,12 +42,9 @@ def _patch_model_config(monkeypatch):
 
 
 def test_save_processor_prefers_independent_tokenizer_source():
-    assert _get_save_processor_id(
-        SimpleNamespace(model_dir='/weights', tokenizer_name_or_path='/tokenizer')
-    ) == '/tokenizer'
-    assert _get_save_processor_id(
-        SimpleNamespace(model_dir='/weights', tokenizer_name_or_path=None)
-    ) == '/weights'
+    assert _get_save_processor_id(SimpleNamespace(model_dir='/weights',
+                                                  tokenizer_name_or_path='/tokenizer')) == '/tokenizer'
+    assert _get_save_processor_id(SimpleNamespace(model_dir='/weights', tokenizer_name_or_path=None)) == '/weights'
 
 
 def test_get_mcore_model_config_reads_mtp_num_layers_from_hf(monkeypatch):
@@ -100,7 +97,6 @@ def test_get_padding_to_sequence_parallel_uses_tp_times_two():
     )
     assert get_padding_to(args) == 4
     seq_len = 57
-    import math
     assert math.ceil(seq_len / 4) * 4 == 60
     assert math.ceil(seq_len / 2) * 2 == 58
 
