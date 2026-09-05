@@ -96,7 +96,7 @@ def _patch_validate_non_overlapping_shards_metadata():
     api2.validate_non_overlapping_shards_metadata = (validate_non_overlapping_shards_metadata)
 
     def _validate_global_plan(*args, **kwargs):
-        # torch returns a list of error messages here; empty list means "no error".
+        # torch returns a list of error messages here; empty list means 'no error'.
         return []
 
     default_planner._validate_global_plan = _validate_global_plan
@@ -285,7 +285,7 @@ def _patch_mcore_bridge():
     import mcore_bridge
     from mcore_bridge import GPTBridge
     from mcore_bridge.model.register import ModelLoader
-    logger.info(f"mcore_bridge.__version__: {mcore_bridge.__version__}")
+    logger.info(f'mcore_bridge.__version__: {mcore_bridge.__version__}')
     if _use_accuracy_compatible_enabled():
         _patch_mcore_bridge_disable_te()
     if not getattr(ModelLoader._replace_spec_dsa, '_swift_norm_accuracy_patch', False):
@@ -386,7 +386,7 @@ def _patch_mcore_bridge():
                     try:
                         custom_object_save(self.hf_model, output_dir, config=hf_config)
                     except FileNotFoundError as e:
-                        logger.error(f"custom_object_save Error: {e}")
+                        logger.error(f'custom_object_save Error: {e}')
                 save_checkpoint(
                     None,
                     processor,
@@ -394,7 +394,7 @@ def _patch_mcore_bridge():
                     model_dirs=[args.model_dir],
                     additional_saved_files=self.hf_model.model_meta.additional_saved_files,
                 )
-            logger.info(f"Successfully saved `safetensors` model weights in `{output_dir}`.")
+            logger.info(f'Successfully saved `safetensors` model weights in `{output_dir}`.')
         dist.barrier()  # Ensure all weights are saved completely
 
     GPTBridge.save_weights = save_weights
@@ -419,4 +419,4 @@ def init_megatron_env():
         pass
     import megatron.core
 
-    logger.info(f"megatron.core.__version__: {megatron.core.__version__}")
+    logger.info(f'megatron.core.__version__: {megatron.core.__version__}')
