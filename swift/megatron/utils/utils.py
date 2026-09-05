@@ -210,6 +210,10 @@ def get_padding_to(args):
     padding_to = None
     if args.tensor_model_parallel_size > 1 and args.sequence_parallel:
         padding_to = args.tensor_model_parallel_size
+        # Sequence-parallel interleaves the sequence across TP ranks at 2x.
+        # Without this the collator pads to ceil(57/TP)*TP=58 while the
+        # PaddleFleet carrier and E-811 IEEE 1-100 are 60 (57 -> TP*SP=4).
+        padding_to = padding_to * 2
     if args.context_parallel_size > 1:
         padding_to = (padding_to or 1) * args.context_parallel_size
     origin_padding_to = padding_to

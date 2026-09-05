@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from swift.megatron.init import _get_save_processor_id, _patch_mcore_bridge_disable_te
 from swift.megatron.model import utils
+from swift.megatron.utils.utils import get_padding_to
 
 
 class _ModelConfigStub:
@@ -83,6 +84,25 @@ def test_get_mcore_model_config_keeps_explicit_mtp_num_layers(monkeypatch):
     config = utils.get_mcore_model_config(_make_args(mtp_num_layers=2), hf_config)
 
     assert config.kwargs['mtp_num_layers'] == 2
+
+
+def test_get_padding_to_sequence_parallel_uses_tp_times_two():
+    args = SimpleNamespace(
+        tensor_model_parallel_size=2,
+        sequence_parallel=True,
+        context_parallel_size=1,
+        fp8_recipe='delayed',
+        fp8_format=None,
+        fp8=None,
+        fp4_format=None,
+        fp4=None,
+        attention_backend='unfused',
+    )
+    assert get_padding_to(args) == 4
+    seq_len = 57
+    import math
+    assert math.ceil(seq_len / 4) * 4 == 60
+    assert math.ceil(seq_len / 2) * 2 == 58
 
 
 def test_dsa_index_share_allows_recompute_none():
