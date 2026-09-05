@@ -1,4 +1,6 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
+import numpy as np
+import os
 import re
 import torch
 import torch.distributed as dist
@@ -280,3 +282,63 @@ def reconstruct_tensor_cp(tensor, packed_seq_params, dim=1) -> torch.Tensor:
     if dim != 0:
         out = out.transpose(0, dim).contiguous()
     return out
+
+
+def get_dump_data_path():
+    return os.environ.get('DUMP_DATA_PATH') or None
+
+
+def get_load_fixed_data_path():
+    return os.environ.get('LOAD_FIXED_DATA_PATH') or None
+
+
+def _batch_data_suffix(step, rank, seq_len):
+    return f"step{step}_rank{rank}_seq{seq_len}.npy"
+
+
+def dump_batch_data(batch, step, seq_len):
+    dump_path = get_dump_data_path()
+    tokens = batch.get('input_ids')
+    labels = batch.get('labels')
+    if not dump_path or tokens is None or labels is None:
+        return
+
+    rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    os.makedirs(dump_path, exist_ok=True)
+    suffix = _batch_data_suffix(step, rank, seq_len)
+    np.save(os.path.join(dump_path, f"tokens_{suffix}"), tokens.detach().cpu().numpy())
+    np.save(os.path.join(dump_path, f"labels_{suffix}"), labels.detach().cpu().numpy())
+    if rank == 0:
+        print(f"[DUMP_DATA_PATH] saved tokens_{suffix} and labels_{suffix}", flush=True)
+
+
+def load_fixed_batch_data(batch, step, seq_len):
+    load_path = get_load_fixed_data_path()
+    if not load_path:
+        return batch
+
+    rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+    suffix = _batch_data_suffix(step, rank, seq_len)
+    tokens_file = os.path.join(load_path, f"tokens_{suffix}")
+    labels_file = os.path.join(load_path, f"labels_{suffix}")
+    if not (os.path.exists(tokens_file) and os.path.exists(labels_file)):
+        if rank == 0:
+            print(f"[LOAD_FIXED_DATA_PATH] file not found: {tokens_file}", flush=True)
+        return batch
+
+    tokens_np = np.load(tokens_file)
+    labels_np = np.load(labels_file)
+    device = batch['input_ids'].device
+    tokens = torch.tensor(tokens_np, dtype=torch.long, device=device)
+    labels = torch.tensor(labels_np, dtype=torch.long, device=device)
+    batch['input_ids'] = tokens
+    batch['labels'] = labels
+    if batch.get('position_ids') is not None:
+        batch['position_ids'] = (
+            torch.arange(tokens.shape[-1], dtype=torch.long, device=device).unsqueeze(0).expand(tokens.shape[0],
+                                                                                                -1).contiguous())
+    if batch.get('loss_scale') is not None:
+        batch['loss_scale'] = torch.ones(tokens.shape, dtype=batch['loss_scale'].dtype, device=device)
+    return batch

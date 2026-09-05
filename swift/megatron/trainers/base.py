@@ -27,13 +27,16 @@ from typing import Callable, Dict, List, Optional
 from swift.dataset import RowPreprocessor
 from swift.megatron.callbacks import megatron_callbacks_map
 from swift.megatron.model import get_mcore_model
-from swift.megatron.utils import (apply_router_replay_patch, disable_forward_pre_hook, enable_forward_pre_hook,
+# yapf: disable
+from swift.megatron.utils import (apply_router_replay_patch, disable_forward_pre_hook, dump_batch_data,
+                                  enable_forward_pre_hook, get_dump_data_path, get_load_fixed_data_path,
                                   get_optimizer_param_scheduler, get_padding_to, init_persistent_async_worker,
-                                  initialize_tp_communicators, load_mcore_checkpoint,
+                                  initialize_tp_communicators, load_fixed_batch_data, load_mcore_checkpoint,
                                   logical_and_across_model_parallel_group, maybe_finalize_async_save,
                                   prepare_mcore_model, reconstruct_tensor_cp,
                                   reduce_max_stat_across_model_parallel_group, save_mcore_checkpoint,
                                   should_disable_forward_pre_hook, warmup_jit_function, wrap_model)
+# yapf: enable
 from swift.template import Template
 from swift.trainers import dynamic_gradient_checkpointing
 from swift.trainers.utils import patch_modelscope_hub_timeout
@@ -1020,7 +1023,16 @@ class BaseMegatronTrainer(ABC):
 
     def get_batch(self, data_iterator, vp_stage=None):
         """Generate a batch."""
-        return self._prepare_batch(next(data_iterator), vp_stage)
+        batch = self._prepare_batch(next(data_iterator), vp_stage)
+        # === ALIGN: 数据流 dump / load (DUMP_DATA_PATH / LOAD_FIXED_DATA_PATH)
+        if get_dump_data_path() or get_load_fixed_data_path():
+            step = getattr(self.state, 'iteration', 0)
+            seq_len = getattr(self.args, 'seq_length', None)
+            if seq_len is None:
+                seq_len = getattr(self.args, 'max_length', 0) or 0
+            batch = load_fixed_batch_data(batch, step, seq_len)
+            dump_batch_data(batch, step, seq_len)
+        return batch
 
     def _collect_config_info(self) -> Dict[str, str]:
         """

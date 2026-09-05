@@ -374,7 +374,12 @@ class MegatronTrainer(BaseMegatronTrainer):
             losses = losses * torch.exp(-losses.detach())
         if loss_scale is not None:
             losses = losses * loss_scale
-        loss = torch.cat([torch.sum(losses * loss_mask).view(1), loss_mask.sum().view(1)])
+        from megatron.core.transformer.module import _use_accuracy_compatible
+        if _use_accuracy_compatible():
+            loss_sum = (losses * loss_mask).reshape(-1).double().sum().float()
+        else:
+            loss_sum = torch.sum(losses * loss_mask)
+        loss = torch.cat([loss_sum.view(1), loss_mask.sum().view(1)])
 
         # Reduce loss for logging.
         reporting_loss = loss.detach().clone()

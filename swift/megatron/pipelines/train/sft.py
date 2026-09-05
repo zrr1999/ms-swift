@@ -43,6 +43,9 @@ class MegatronSft(SwiftSft):
         self.train_msg = {}
         super(SwiftSft, self).__init__(args)
         args = self.args
+        from megatron.core.transformer.module import _use_accuracy_compatible
+        if _use_accuracy_compatible() and getattr(args, 'clip_grad', 0) > 0:
+            args.clip_grad = 0.0
         if repatch is not None:
             megatron_args = asdict(self.args)
             if args.attention_backend != 'local':
