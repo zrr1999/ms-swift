@@ -96,10 +96,8 @@ def configure_deterministic_mode(args):
     nccl_algo = os.environ.get('NCCL_ALGO')
     allowed_nccl_algorithms = {'Tree', 'Ring', 'CollnetDirect', 'CollnetChain', '^NVLS'}
     if nccl_algo not in allowed_nccl_algorithms:
-        raise ValueError(
-            f'NCCL_ALGO must be explicitly set to one of {sorted(allowed_nccl_algorithms)} '
-            'in deterministic mode.'
-        )
+        raise ValueError(f'NCCL_ALGO must be explicitly set to one of {sorted(allowed_nccl_algorithms)} '
+                         'in deterministic mode.')
     torch.use_deterministic_algorithms(True)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False

@@ -1,8 +1,7 @@
-from types import SimpleNamespace
-
 import pytest
 import torch
 from datasets import Dataset
+from types import SimpleNamespace
 
 from swift.dataset import validate_pretokenized_dataset
 from swift.megatron.trainers import utils as trainer_utils
@@ -51,6 +50,7 @@ def test_model_loader_uses_independent_processor_path():
     requested = []
 
     class FakeTokenizer:
+
         @classmethod
         def from_pretrained(cls, path, **kwargs):
             requested.append((path, kwargs))

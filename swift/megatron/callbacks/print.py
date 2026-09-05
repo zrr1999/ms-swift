@@ -15,8 +15,7 @@ def raw_loss_event(step, logs):
     """Return an unrounded training-loss event, excluding evaluation metrics."""
     raw_losses = {
         key: value
-        for key, value in logs.items()
-        if key == 'loss' or (key.startswith('mtp_') and key.endswith('_loss'))
+        for key, value in logs.items() if key == 'loss' or (key.startswith('mtp_') and key.endswith('_loss'))
     }
     return {'step': step, **raw_losses} if raw_losses else None
 

@@ -23,9 +23,8 @@ def project_owning_loader_semantics(input_values, model_label_values, semantic_l
     """Normalize padded Megatron carrier tensors back to the dataset semantic row."""
     semantic_length = int(semantic_length)
     if semantic_length <= 0 or semantic_length > len(input_values) or semantic_length > len(model_label_values):
-        raise ValueError(
-            f'invalid owning-loader semantic length {semantic_length} for carrier lengths '
-            f'{len(input_values)}/{len(model_label_values)}')
+        raise ValueError(f'invalid owning-loader semantic length {semantic_length} for carrier lengths '
+                         f'{len(input_values)}/{len(model_label_values)}')
     semantic_input_values = input_values[:semantic_length]
     normalized_label_values = model_label_values
     if labels_were_shifted and model_label_values:
@@ -172,25 +171,32 @@ class MegatronTrainer(BaseMegatronTrainer):
                             module_hits[module_name].append((chunk_index, module))
                 invalid = {name: len(hits) for name, hits in module_hits.items() if len(hits) != 1}
                 if invalid:
-                    raise RuntimeError(f'layer0 fine forward selectors must match exactly once on rank {rank}: {invalid}')
+                    raise RuntimeError(
+                        f'layer0 fine forward selectors must match exactly once on rank {rank}: {invalid}')
                 for module_name, boundary in fine_specs.items():
                     chunk_index, module = module_hits[module_name][0]
-                    handles.append(module.register_forward_hook(
-                        lambda _module, _inputs, output, name=boundary: self._write_forward_record(name, output)))
+                    handles.append(
+                        module.register_forward_hook(
+                            lambda _module, _inputs, output, name=boundary: self._write_forward_record(name, output)))
                     selected.append({'chunk': chunk_index, 'module': module_name, 'boundary': boundary})
             self._forward_contract_selector_receipt = selected
             rank_dir = os.path.join(output_dir, f'rank{rank}')
             os.makedirs(rank_dir, exist_ok=True)
             with open(os.path.join(rank_dir, 'metadata.json'), 'w', encoding='utf-8') as stream:
-                json.dump({
-                    'schema': 'glm52-local-forward-boundaries/v1',
-                    'framework': 'torch',
-                    'rank': rank,
-                    'world_size': torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1,
-                    'boundary_set': boundary_set,
-                    'selectors': selected,
-                    'records': {},
-                }, stream, ensure_ascii=False, indent=2, sort_keys=True)
+                json.dump(
+                    {
+                        'schema': 'glm52-local-forward-boundaries/v1',
+                        'framework': 'torch',
+                        'rank': rank,
+                        'world_size': torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1,
+                        'boundary_set': boundary_set,
+                        'selectors': selected,
+                        'records': {},
+                    },
+                    stream,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True)
                 stream.write('\n')
             self._forward_contract_handles = handles
             self._forward_contract_installed = True
@@ -205,22 +211,26 @@ class MegatronTrainer(BaseMegatronTrainer):
                     local_layer = int(match.group(1))
                     global_layer = local_layer if rank < 2 else local_layer + 2
                     input_boundary = f'base_layer_{global_layer}_input'
-                    handles.append(module.register_forward_pre_hook(
-                        lambda _module, inputs, name=input_boundary: self._write_forward_record(name, inputs)))
+                    handles.append(
+                        module.register_forward_pre_hook(
+                            lambda _module, inputs, name=input_boundary: self._write_forward_record(name, inputs)))
                     boundary = f'base_layer_{global_layer}_output'
                 elif module_name == 'decoder.final_layernorm':
                     boundary = 'final_norm_output'
                 elif module_name == 'output_layer':
                     input_boundary = 'output_head_input'
-                    handles.append(module.register_forward_pre_hook(
-                        lambda _module, inputs, name=input_boundary: self._write_forward_record(name, inputs)))
+                    handles.append(
+                        module.register_forward_pre_hook(
+                            lambda _module, inputs, name=input_boundary: self._write_forward_record(name, inputs)))
                     boundary = 'output_head_output'
                 elif module_name.startswith('mtp.layers.0.') and module_name.rsplit('.', 1)[-1] in {
-                        'enorm', 'hnorm', 'eh_proj', 'mtp_model_layer', 'layer_norm', 'final_layernorm'}:
+                        'enorm', 'hnorm', 'eh_proj', 'mtp_model_layer', 'layer_norm', 'final_layernorm'
+                }:
                     boundary = f"mtp_{module_name.removeprefix('mtp.layers.0.').replace('.', '_')}_output"
                 if boundary is not None:
-                    handles.append(module.register_forward_hook(
-                        lambda _module, _inputs, output, name=boundary: self._write_forward_record(name, output)))
+                    handles.append(
+                        module.register_forward_hook(
+                            lambda _module, _inputs, output, name=boundary: self._write_forward_record(name, output)))
         self._forward_contract_handles = handles
         self._forward_contract_installed = True
 
@@ -261,7 +271,8 @@ class MegatronTrainer(BaseMegatronTrainer):
             return
         if not mpu.is_pipeline_last_stage(ignore_virtual=False):
             return
-        if torch.distributed.is_initialized() and torch.distributed.get_rank() != torch.distributed.get_world_size() - 1:
+        if (torch.distributed.is_initialized()
+                and torch.distributed.get_rank() != torch.distributed.get_world_size() - 1):
             return
         input_ids = data.get('input_ids')
         labels = data.get('labels')
@@ -278,8 +289,8 @@ class MegatronTrainer(BaseMegatronTrainer):
         label_values = values(labels)
         model_mask_values = [label != -100 for label in label_values]
         semantic_length = seq_lens[0] if seq_lens else len(input_values)
-        labels_were_shifted = self.args.task_type == 'causal_lm' and not getattr(
-            self.args, 'pretokenized_dataset', False)
+        labels_were_shifted = self.args.task_type == 'causal_lm' and not getattr(self.args, 'pretokenized_dataset',
+                                                                                 False)
         semantic_input_values, semantic_label_values, semantic_mask_values = project_owning_loader_semantics(
             input_values, label_values, semantic_length, labels_were_shifted)
         payload = {
