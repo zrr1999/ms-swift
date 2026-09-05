@@ -41,6 +41,10 @@ jobs:
     # The type of runner that the job will run on
     runs-on: [self-hosted]
     timeout-minutes: 240
+    env:
+      # self-hosted paddle-4 glibc < 2.27; runner forces Node 24 for
+      # actions/checkout@v3 (job 101275701451). Allow Node 20 so checkout runs.
+      ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
     steps:
       - name: ResetFileMode
         shell: bash
