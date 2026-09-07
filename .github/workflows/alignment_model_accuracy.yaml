@@ -162,7 +162,7 @@ jobs:
             fi
             echo "checked_out_head=$(git rev-parse HEAD)"
             test -z "$COMMIT_ID" || test "$(git rev-parse HEAD)" = "$COMMIT_ID"
-            git log --pretty=oneline -10
+            checkout_step swift-history 30s git --no-pager log --pretty=oneline -10
           '
       - name: Change python version
         run: |
