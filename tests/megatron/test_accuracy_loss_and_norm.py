@@ -4,12 +4,11 @@ import ast
 import contextlib
 import io
 import sys
+import torch
 import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-
-import torch
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -22,8 +21,9 @@ def production_function(relative_path, name, namespace):
         raise AssertionError(f'Expected one production function: {path}:{name}')
     node = matches[0]
     node.decorator_list = []
-    module = ast.Module(body=[ast.ImportFrom(module='__future__', names=[ast.alias(name='annotations')], level=0), node],
-                        type_ignores=[])
+    module = ast.Module(
+        body=[ast.ImportFrom(module='__future__', names=[ast.alias(name='annotations')], level=0), node],
+        type_ignores=[])
     exec(compile(ast.fix_missing_locations(module), str(path), 'exec'), namespace)
     return namespace[name]
 
@@ -40,8 +40,8 @@ class AccuracyLossAndNormTest(unittest.TestCase):
                         'mpu': types.SimpleNamespace(get_data_parallel_group=lambda **kwargs: None),
                         '_use_accuracy_compatible_enabled': lambda: enabled,
                     })
-                trainer = types.SimpleNamespace(args=types.SimpleNamespace(enable_dft_loss=False,
-                                                                          enable_channel_loss=False))
+                trainer = types.SimpleNamespace(
+                    args=types.SimpleNamespace(enable_dft_loss=False, enable_channel_loss=False))
                 values = torch.tensor([[2., 19., 3.]], device='cuda', requires_grad=True)
                 labels = torch.tensor([[1, -100, 2]], device='cuda')
                 scale = torch.tensor([[0.5, 1000., 2.]], device='cuda')
@@ -71,9 +71,11 @@ class AccuracyLossAndNormTest(unittest.TestCase):
                         '_use_accuracy_compatible_enabled': lambda: enabled,
                     })
                 indexer = types.SimpleNamespace(submodules=types.SimpleNamespace(k_norm=provider_norm))
-                attention = types.SimpleNamespace(submodules=types.SimpleNamespace(
-                    q_layernorm=provider_norm, kv_layernorm=provider_norm,
-                    core_attention=types.SimpleNamespace(submodules=types.SimpleNamespace(indexer=indexer))))
+                attention = types.SimpleNamespace(
+                    submodules=types.SimpleNamespace(
+                        q_layernorm=provider_norm,
+                        kv_layernorm=provider_norm,
+                        core_attention=types.SimpleNamespace(submodules=types.SimpleNamespace(indexer=indexer))))
                 spec = types.SimpleNamespace(submodules=types.SimpleNamespace(self_attention=attention))
                 loader = types.SimpleNamespace(config=types.SimpleNamespace(norm_accuracy_compatible=norm_accuracy))
                 with patch.dict(sys.modules, {module.__name__: module}):

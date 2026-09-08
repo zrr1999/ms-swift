@@ -279,8 +279,8 @@ def _patch_mcore_bridge_disable_te():
 
 def _patch_mcore_bridge_tp1_accuracy():
     """Keep the TP1 accuracy graph free of bridge-only viewless nodes."""
-    from megatron.core import parallel_state
     from mcore_bridge.model.modules import mtp_layer, transformer_block
+    from megatron.core import parallel_state
 
     def patch_module(module):
         original = module.make_viewless_tensor
@@ -288,8 +288,7 @@ def _patch_mcore_bridge_tp1_accuracy():
             return
 
         def make_viewless_tensor(inp, requires_grad, keep_graph):
-            if (_use_accuracy_compatible_enabled()
-                    and parallel_state.get_tensor_model_parallel_world_size() <= 1):
+            if (_use_accuracy_compatible_enabled() and parallel_state.get_tensor_model_parallel_world_size() <= 1):
                 return inp
             return original(inp=inp, requires_grad=requires_grad, keep_graph=keep_graph)
 
