@@ -116,6 +116,7 @@ class BaseMegatronTrainer(ABC):
         if args.mcore_model is not None:
             self.state.iteration = load_mcore_checkpoint(
                 args, self.wrapped_models, self.optimizer, self.opt_param_scheduler, load_arg='mcore_model')
+            self._model_repro_weights_source = args.mcore_model
         if args.mcore_adapter is not None:
             self.state.iteration = load_mcore_checkpoint(
                 args, self.wrapped_models, self.optimizer, self.opt_param_scheduler, load_arg='mcore_adapter')
@@ -199,6 +200,7 @@ class BaseMegatronTrainer(ABC):
         args = self.args
         if args.mcore_model is None:
             self.bridge.load_weights(models, args.model_dir)
+            self._model_repro_weights_source = args.model_dir
         peft_models = [prepare_mcore_model(args, model) for model in models]
         if args.tuner_type == 'lora' and args.adapters and args.mcore_adapter is None:
             assert len(args.adapters) == 1, 'Currently only support one adapter.'
@@ -776,9 +778,13 @@ class BaseMegatronTrainer(ABC):
         state = self.state
         args.consumed_train_samples = state.consumed_train_samples
         iteration = state.iteration
-        output_dir = os.path.join(args.output_dir, f'checkpoint-{iteration}')
+        formal_checkpoint_dir = os.environ.get('MODEL_REPRO_CHECKPOINT_DIR')
+        if formal_checkpoint_dir and iteration == args.train_iters:
+            output_dir = os.path.abspath(os.path.expanduser(formal_checkpoint_dir))
+        else:
+            output_dir = os.path.join(args.output_dir, f'checkpoint-{iteration}')
         os.makedirs(output_dir, exist_ok=True)
-        args_path = os.path.join(os.path.dirname(output_dir), 'args.json')
+        args_path = os.path.join(args.output_dir, 'args.json')
         self.copy_path(args_path, os.path.join(output_dir, 'args.json'))
         if args.save_safetensors and args.no_save_optim:
             model = []

@@ -277,6 +277,29 @@ def _patch_mcore_bridge_disable_te():
     )
 
 
+def _patch_mcore_bridge_tp1_accuracy():
+    """Keep the TP1 accuracy graph free of bridge-only viewless nodes."""
+    from megatron.core import parallel_state
+    from mcore_bridge.model.modules import mtp_layer, transformer_block
+
+    def patch_module(module):
+        original = module.make_viewless_tensor
+        if getattr(original, '_swift_tp1_accuracy_patch', False):
+            return
+
+        def make_viewless_tensor(inp, requires_grad, keep_graph):
+            if (_use_accuracy_compatible_enabled()
+                    and parallel_state.get_tensor_model_parallel_world_size() <= 1):
+                return inp
+            return original(inp=inp, requires_grad=requires_grad, keep_graph=keep_graph)
+
+        make_viewless_tensor._swift_tp1_accuracy_patch = True
+        module.make_viewless_tensor = make_viewless_tensor
+
+    patch_module(mtp_layer)
+    patch_module(transformer_block)
+
+
 def _patch_mcore_bridge():
     require_version(
         'mcore-bridge>=1.4.0',
@@ -288,18 +311,26 @@ def _patch_mcore_bridge():
     logger.info(f'mcore_bridge.__version__: {mcore_bridge.__version__}')
     if _use_accuracy_compatible_enabled():
         _patch_mcore_bridge_disable_te()
+        _patch_mcore_bridge_tp1_accuracy()
     if not getattr(ModelLoader._replace_spec_dsa, '_swift_norm_accuracy_patch', False):
         origin_replace_spec_dsa = ModelLoader._replace_spec_dsa
 
         def replace_spec_dsa(self, layer_spec):
             origin_replace_spec_dsa(self, layer_spec)
-            if not getattr(self.config, 'norm_accuracy_compatible', False):
-                return
             from megatron.core.transformer.torch_norm import WrappedTorchNorm
 
             dsa_spec = layer_spec.submodules.self_attention
-            dsa_spec.submodules.q_layernorm = WrappedTorchNorm
-            dsa_spec.submodules.kv_layernorm = WrappedTorchNorm
+            if getattr(self.config, 'norm_accuracy_compatible', False):
+                dsa_spec.submodules.q_layernorm = WrappedTorchNorm
+                dsa_spec.submodules.kv_layernorm = WrappedTorchNorm
+            indexer = getattr(
+                getattr(dsa_spec.submodules.core_attention, 'submodules', None),
+                'indexer',
+                None,
+            )
+            if (_use_accuracy_compatible_enabled() and indexer is not None
+                    and getattr(indexer, 'submodules', None) is not None):
+                indexer.submodules.k_norm = WrappedTorchNorm
 
         replace_spec_dsa._swift_norm_accuracy_patch = True
         ModelLoader._replace_spec_dsa = replace_spec_dsa
