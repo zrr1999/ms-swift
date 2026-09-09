@@ -47,6 +47,20 @@ def test_save_processor_prefers_independent_tokenizer_source():
     assert _get_save_processor_id(SimpleNamespace(model_dir='/weights', tokenizer_name_or_path=None)) == '/weights'
 
 
+def test_get_mcore_model_config_propagates_accuracy_mode(monkeypatch):
+    # Preserve the real inherited dataclass fields while avoiding model construction.
+    actual_fields = utils.fields(utils.ModelConfig)
+    assert 'use_accuracy_compatible' in {field.name for field in actual_fields}
+    monkeypatch.setattr(utils, 'ModelConfig', _ModelConfigStub)
+    monkeypatch.setattr(utils, 'fields', lambda _: actual_fields)
+    for enabled in (False, True, False):
+        args = _make_args()
+        args.use_accuracy_compatible = enabled
+        monkeypatch.setenv('USE_ACCURACY_COMPATIBLE', str(int(not enabled)))
+        config = utils.get_mcore_model_config(args, PretrainedConfig())
+        assert config.kwargs['use_accuracy_compatible'] is enabled
+
+
 def test_get_mcore_model_config_reads_mtp_num_layers_from_hf(monkeypatch):
     _patch_model_config(monkeypatch)
     hf_config = PretrainedConfig(num_nextn_predict_layers=1)
