@@ -3,36 +3,6 @@ name: Alignment Model Accuracy
 on:
   pull_request:
   workflow_dispatch:
-    inputs:
-      paddlefleet_mode:
-        description: "develop keeps the historical CodeSync tarball. stack-paired fail-closed SHA check."
-        type: choice
-        default: develop
-        options: [develop, stack-paired]
-      paddlefleet_pin_sha:
-        description: "40-hex PaddleFleet commit (required for stack-paired)"
-        required: false
-        type: string
-      paddlefleet_git_url:
-        description: "Git URL that contains paddlefleet_pin_sha"
-        required: false
-        type: string
-      paddlefleet_wheel_url:
-        description: "Optional wheel URL from Build Fleet whl / Actions artifact metadata"
-        required: false
-        type: string
-      paddlefleet_wheel_sha256:
-        description: "sha256 for paddlefleet_wheel_url"
-        required: false
-        type: string
-      paddlefleet_ops_wheel_url:
-        description: "Optional paddlefleet_ops wheel URL"
-        required: false
-        type: string
-      paddlefleet_ops_wheel_sha256:
-        description: "sha256 for paddlefleet_ops_wheel_url"
-        required: false
-        type: string
 
 concurrency:
   group: Alignment-${{ github.workflow }}-${{ github.event.pull_request.number }}
@@ -47,14 +17,6 @@ env:
   TASK: MS-SWIFT-${{ github.sha }}-alignment
   CE_name: alignment-ms-swift
   no_proxy: "localhost,bj.bcebos.com,su.bcebos.com,bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
-  # pull_request stays on historical develop. stack-paired is workflow_dispatch only.
-  ALIGNMENT_PADDLEFLEET_MODE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.paddlefleet_mode || 'develop' }}
-  PADDLEFLEET_PIN_SHA: ${{ github.event.inputs.paddlefleet_pin_sha }}
-  PADDLEFLEET_GIT_URL: ${{ github.event.inputs.paddlefleet_git_url }}
-  PADDLEFLEET_WHEEL_URL: ${{ github.event.inputs.paddlefleet_wheel_url }}
-  PADDLEFLEET_WHEEL_SHA256: ${{ github.event.inputs.paddlefleet_wheel_sha256 }}
-  PADDLEFLEET_OPS_WHEEL_URL: ${{ github.event.inputs.paddlefleet_ops_wheel_url }}
-  PADDLEFLEET_OPS_WHEEL_SHA256: ${{ github.event.inputs.paddlefleet_ops_wheel_sha256 }}
 
 defaults:
   run:
@@ -93,76 +55,36 @@ jobs:
             -e no_proxy \
             -e CE_name \
             -e python_version \
-            -e ALIGNMENT_PADDLEFLEET_MODE \
-            -e PADDLEFLEET_PIN_SHA \
-            -e PADDLEFLEET_GIT_URL \
-            -e PADDLEFLEET_WHEEL_URL \
-            -e PADDLEFLEET_WHEEL_SHA256 \
-            -e PADDLEFLEET_OPS_WHEEL_URL \
-            -e PADDLEFLEET_OPS_WHEEL_SHA256 \
             -w /workspace $IMAGE_NAME
       - name: Checkout Code
         run: |
           docker exec -t $container_name /bin/bash -c '
-            set -eo pipefail
             rm -rf * .[^.]*
             source $work_dir/../../../proxy
-            command -v timeout >/dev/null || { echo "checkout requires timeout" >&2; exit 127; }
-            # Keep this inline: the requested repository has not been checked out yet.
-            # Log labels, never command arguments (which can contain credentials).
-            checkout_step() {
-              local label="$1" limit="$2" status=0 started=$SECONDS
-              shift 2
-              echo "checkout begin: ${label} utc=$(date -u +%FT%TZ) timeout=${limit}"
-              timeout --signal=TERM --kill-after=30s "$limit" "$@" || status=$?
-              echo "checkout end: ${label} status=${status} elapsed=$((SECONDS - started))s"
-              if [ "$status" -eq 124 ]; then
-                echo "checkout timed out: ${label} limit=${limit} status=${status}" >&2
-              elif [ "$status" -eq 137 ]; then
-                echo "checkout terminated: ${label} status=137 (timeout escalation or SIGKILL)" >&2
-              elif [ "$status" -ne 0 ]; then
-                echo "checkout failed: ${label} status=${status}" >&2
-              fi
-              return "$status"
-            }
-            if [ "${ALIGNMENT_PADDLEFLEET_MODE:-develop}" = "stack-paired" ]; then
-              echo "stack-paired: skip CodeSync/develop PaddleFleet.tar; selector runs after python"
-            else
-              echo "Download PaddleFleet form https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddleFleet.tar"
-              checkout_step paddlefleet-download 600s wget -q --no-proxy --timeout=60 --tries=3  https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddleFleet.tar --no-check-certificate
-              rm -rf PaddleFleet && tar xf PaddleFleet.tar && rm -rf PaddleFleet.tar
-              cd PaddleFleet
-              checkout_step paddlefleet-pull 300s git pull
-              cd -
-            fi
-
+            echo "Download PaddleFleet form https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddleFleet.tar"
+            wget -q --no-proxy  https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddleFleet.tar --no-check-certificate
+            rm -rf PaddleFleet && tar xf PaddleFleet.tar && rm -rf PaddleFleet.tar
+            cd PaddleFleet && git pull && cd -
+            
             echo "Download ms-swift form https://paddle-github-action.bj.bcebos.com/whl/ms-swift.tar.gz"
-            checkout_step swift-download 600s wget -q --no-proxy --timeout=60 --tries=3 https://paddle-github-action.bj.bcebos.com/whl/ms-swift.tar.gz --no-check-certificate
+            wget -q --no-proxy https://paddle-github-action.bj.bcebos.com/whl/ms-swift.tar.gz --no-check-certificate
             rm -rf ms-swift && tar zxf ms-swift.tar.gz && rm -rf ms-swift.tar.gz
             cd ms-swift
             git config --global --add safe.directory /workspace/ms-swift
-            checkout_step swift-pull 300s git pull
-            checkout_step swift-initial-submodules 900s git submodule update --init --recursive --force
-            git remote add upstream https://github.com/PFCCLab/ms-swift.git || true
+            git pull
+            git submodule update --init --recursive --force
             if [ -n "$PR_ID" ] && [ "$PR_ID" != "0" ]; then
-              checkout_step swift-pr-fetch 300s git fetch origin pull/${PR_ID}/head
-              checkout_step swift-pr-checkout 120s git checkout -B PR_${PR_ID} FETCH_HEAD
+              git fetch origin pull/${PR_ID}/head
+              git checkout -b PR_${PR_ID} FETCH_HEAD
+              git remote add upstream https://github.com/PFCCLab/ms-swift.git
               echo "Checking out ${BRANCH}..."
-              checkout_step swift-base-fetch 300s git fetch upstream ${BRANCH}:${BRANCH} || true
-              checkout_step swift-base-merge 120s git merge ${BRANCH} --no-edit || true
+              git fetch upstream ${BRANCH}:${BRANCH}
+              git merge ${BRANCH} --no-edit
               git diff --numstat ${BRANCH} -- | awk "{print \$NF}"
-            elif [ -n "$COMMIT_ID" ]; then
-              echo "workflow_dispatch: checkout COMMIT_ID=${COMMIT_ID} (not BOS main)"
-              checkout_step swift-fetch-all 900s git fetch --all --tags || true
-              checkout_step swift-commit-fetch-origin 300s git fetch origin "$COMMIT_ID" || checkout_step swift-commit-fetch-upstream 300s git fetch upstream "$COMMIT_ID" || true
-              checkout_step swift-commit-checkout 120s git checkout --force "$COMMIT_ID"
-              checkout_step swift-target-submodules 900s git submodule update --init --recursive --force
             else
-              echo "Not in a pull_request event and COMMIT_ID empty. Leaving tarball HEAD."
+              echo "Not in a pull_request event. Skipping PR-specific operations."
             fi
-            echo "checked_out_head=$(git rev-parse HEAD)"
-            test -z "$COMMIT_ID" || test "$(git rev-parse HEAD)" = "$COMMIT_ID"
-            checkout_step swift-history 30s git --no-pager log --pretty=oneline -10
+            git log --pretty=oneline -10
           '
       - name: Change python version
         run: |
@@ -182,45 +104,24 @@ jobs:
       - name: Get Whl
         run: |
           docker exec -t $container_name /bin/bash -c '
-          set -eo pipefail
           . /opt/conda/etc/profile.d/conda.sh
           conda activate py_$python_version
           python --version
           ldconfig
 
           BOS=https://paddle-github-action.bj.bcebos.com
+          echo "::group::Download paddlefleet / paddlefleet_ops / megatron-core / mcore-bridge wheels from BOS"
           cd /workspace
-          if [ "${ALIGNMENT_PADDLEFLEET_MODE:-develop}" = "stack-paired" ]; then
-            echo "::group::Select stack-paired PaddleFleet (fail-closed SHA)"
-            python -m pip install uv
-            test -x /workspace/ms-swift/scripts/select_paddlefleet_alignment_pin.sh \
-              || { echo "::error:: selector missing; checkout did not land COMMIT_ID"; exit 1; }
-            bash /workspace/ms-swift/scripts/select_paddlefleet_alignment_pin.sh --dest /workspace \
-              || { echo "::error:: selector failed; stop Get Whl (do not download remaining wheels or build ms-swift)"; exit 1; }
-            bash /workspace/ms-swift/scripts/require_paddlefleet_selector_ok.sh /workspace \
-              || { echo "::error:: selector receipt status is not ok; stop Get Whl"; exit 1; }
-            echo "::endgroup::"
-            echo "::group::Download remaining wheels from BOS"
-            for url in \
-              $BOS/whl/megatron_core-0.0.0-cp312-cp312-linux_x86_64.whl \
-              $BOS/whl/mcore_bridge-0.0.0-py3-none-any.whl ; do
-              echo "Downloading $url"
-              wget -q --no-proxy --no-check-certificate --tries=3 --timeout=60 "$url"
-            done
-            echo "::endgroup::"
-          else
-            echo "::group::Download paddlefleet / paddlefleet_ops / megatron-core / mcore-bridge wheels from BOS"
-            for url in \
-              $BOS/PaddleFleet/develop/latest/paddlefleet-0.0.0-py3-none-linux_x86_64.whl \
-              $BOS/PaddleFleet/develop/latest/cu130/paddle-release/paddlefleet_ops-0.0.0-cp312-cp312-linux_x86_64.whl \
-              $BOS/whl/megatron_core-0.0.0-cp312-cp312-linux_x86_64.whl \
-              $BOS/whl/mcore_bridge-0.0.0-py3-none-any.whl ; do
-              echo "Downloading $url"
-              wget -q --no-proxy --no-check-certificate --tries=3 --timeout=60 "$url"
-            done
-            echo "::endgroup::"
-          fi
+          for url in \
+            $BOS/PaddleFleet/develop/latest/paddlefleet-0.0.0-py3-none-linux_x86_64.whl \
+            $BOS/PaddleFleet/develop/latest/cu130/paddle-release/paddlefleet_ops-0.0.0-cp312-cp312-linux_x86_64.whl \
+            $BOS/whl/megatron_core-0.0.0-cp312-cp312-linux_x86_64.whl \
+            $BOS/whl/mcore_bridge-0.0.0-py3-none-any.whl ; do
+            echo "Downloading $url"
+            wget -q --no-proxy --no-check-certificate --tries=3 --timeout=60 "$url"
+          done
           ls -l /workspace/
+          echo "::endgroup::"
 
           echo "::group::Build ms-swift wheel"
           cd /workspace/ms-swift
@@ -232,7 +133,6 @@ jobs:
       - name: alignment_model_accuracy
         run: |
           docker exec -t $container_name /bin/bash -c '
-          set -eo pipefail
           . /opt/conda/etc/profile.d/conda.sh
           conda activate py_$python_version
           python --version
@@ -240,24 +140,18 @@ jobs:
 
           source $work_dir/../../../proxy
           export PROXY_URL="${http_proxy}"
-          ALIGNMENT_PADDLEFLEET_MODE="${ALIGNMENT_PADDLEFLEET_MODE:-develop}" \
-          PADDLEFLEET_PIN_SHA="${PADDLEFLEET_PIN_SHA:-}" \
-          bash /workspace/ms-swift/scripts/consume_paddlefleet_alignment_pin.sh \
-            --env /workspace/paddlefleet_alignment_pin.env \
-            --out /workspace/paddlefleet_alignment_pin.consumed.env
-          set -a
-          . /workspace/paddlefleet_alignment_pin.consumed.env
-          set +a
+          export PADDLEFLEET_WHEEL_PATH="/workspace/paddlefleet-0.0.0-py3-none-linux_x86_64.whl"
+          export PADDLEFLEET_OPS_WHEEL_PATH="/workspace/paddlefleet_ops-0.0.0-cp312-cp312-linux_x86_64.whl"
           export MEGATRON_CORE_WHEEL_PATH=/workspace/megatron_core-0.0.0-cp312-cp312-linux_x86_64.whl
           export MS_SWIFT_WHEEL_PATH=/workspace/upload/ms_swift-0.0.0-py3-none-any.whl
           export MCORE_BRIDGE_WHEEL_PATH=/workspace/mcore_bridge-0.0.0-py3-none-any.whl
-          # The BOS wheels are republished under a fixed 0.0.0 filename
+          # The BOS wheels are republished under a fixed 0.0.0 filename 
           export UV_SKIP_WHEEL_FILENAME_CHECK=1
 
           for whl in "$PADDLEFLEET_WHEEL_PATH" "$PADDLEFLEET_OPS_WHEEL_PATH" \
             "$MS_SWIFT_WHEEL_PATH" "$MEGATRON_CORE_WHEEL_PATH" \
             "$MCORE_BRIDGE_WHEEL_PATH"; do
-            [ -e "$whl" ] || { echo "::error:: missing wheel: $whl"; exit 1; }
+            [ -f "$whl" ] || { echo "::error:: missing wheel: $whl"; exit 1; }
             echo "using $whl"
           done
           python -m pip install uv
