@@ -61,13 +61,13 @@ def test_get_mcore_model_config_propagates_accuracy_mode(monkeypatch):
         assert config.kwargs['use_accuracy_compatible'] is enabled
 
 
-def test_get_mcore_model_config_reads_mtp_num_layers_from_hf(monkeypatch):
+def test_get_mcore_model_config_does_not_enable_mtp_from_checkpoint(monkeypatch):
     _patch_model_config(monkeypatch)
     hf_config = PretrainedConfig(num_nextn_predict_layers=1)
 
     config = utils.get_mcore_model_config(_make_args(), hf_config)
 
-    assert config.kwargs['mtp_num_layers'] == 1
+    assert not config.kwargs.get('mtp_num_layers')
 
 
 def test_glm52_loss_sum_contract_keeps_other_models_default(monkeypatch):
@@ -91,13 +91,13 @@ def test_loss_sum_contract_rejects_unsupported_dtype(monkeypatch):
         raise AssertionError('BF16 loss accumulation must fail before constructing the model')
 
 
-def test_get_mcore_model_config_reads_mtp_num_hidden_layers(monkeypatch):
+def test_get_mcore_model_config_does_not_enable_mtp_from_nested_checkpoint(monkeypatch):
     _patch_model_config(monkeypatch)
     hf_config = PretrainedConfig(text_config=PretrainedConfig(mtp_num_hidden_layers=1))
 
     config = utils.get_mcore_model_config(_make_args(), hf_config)
 
-    assert config.kwargs['mtp_num_layers'] == 1
+    assert not config.kwargs.get('mtp_num_layers')
 
 
 def test_get_mcore_model_config_prefers_n_routed_experts(monkeypatch):
@@ -113,9 +113,9 @@ def test_get_mcore_model_config_keeps_explicit_mtp_num_layers(monkeypatch):
     _patch_model_config(monkeypatch)
     hf_config = PretrainedConfig(num_nextn_predict_layers=1)
 
-    config = utils.get_mcore_model_config(_make_args(mtp_num_layers=2), hf_config)
-
-    assert config.kwargs['mtp_num_layers'] == 2
+    for depth in (0, 1, 2):
+        config = utils.get_mcore_model_config(_make_args(mtp_num_layers=depth), hf_config)
+        assert config.kwargs['mtp_num_layers'] == depth
 
 
 def test_get_padding_to_sequence_parallel_uses_tp_times_two():

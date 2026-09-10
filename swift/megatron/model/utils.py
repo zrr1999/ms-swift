@@ -44,14 +44,6 @@ def _check_dsa_index_share_recompute(config):
             'replayed without its source computing layer. Set recompute_granularity=none.')
 
 
-def _get_hf_mtp_num_layers(hf_config):
-    llm_config = HfConfigFactory.get_text_config(hf_config)
-    for key in ['num_nextn_predict_layers', 'mtp_num_hidden_layers']:
-        value = getattr(llm_config, key, None)
-        if value is not None:
-            return value
-
-
 def get_mcore_model_config(args, hf_config):
     kwargs = hf_to_mcore_config(hf_config)
     llm_config = HfConfigFactory.get_text_config(hf_config)
@@ -60,10 +52,8 @@ def get_mcore_model_config(args, hf_config):
         kwargs['accuracy_compatible_loss_sum_dtype'] = 'float32'
     if n_routed_experts is not None:
         kwargs['num_moe_experts'] = n_routed_experts
-    if getattr(args, 'mtp_num_layers', None) is None:
-        mtp_num_layers = _get_hf_mtp_num_layers(hf_config)
-        if mtp_num_layers is not None:
-            kwargs['mtp_num_layers'] = mtp_num_layers
+    # Checkpoint MTP metadata describes available weights, not an opt-in to
+    # auxiliary training. The explicit mtp_num_layers argument below controls it.
     kwargs['mcore_model_type'] = args.megatron_model_meta.model_type
     kwargs['hf_config'] = hf_config
     for f in fields(ModelConfig):
