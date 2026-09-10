@@ -79,4 +79,3 @@ echo -e "\033[32m ---- make ms-swift.tar.gz  \033[0m"
 swift_tar
 echo -e "\033[32m ---- build ms-swift whl  \033[0m"
 swift_build
-
