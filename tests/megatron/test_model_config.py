@@ -70,6 +70,27 @@ def test_get_mcore_model_config_reads_mtp_num_layers_from_hf(monkeypatch):
     assert config.kwargs['mtp_num_layers'] == 1
 
 
+def test_glm52_loss_sum_contract_keeps_other_models_default(monkeypatch):
+    _patch_model_config(monkeypatch)
+    for model_type in ('glm_moe_dsa', 'glm4_moe', 'minimax_m2'):
+        hf_config = PretrainedConfig(model_type=model_type)
+        config = utils.get_mcore_model_config(_make_args(), hf_config)
+        assert config.kwargs.get('accuracy_compatible_loss_sum_dtype',
+                                 'float64') == ('float32' if model_type == 'glm_moe_dsa' else 'float64')
+
+
+def test_loss_sum_contract_rejects_unsupported_dtype(monkeypatch):
+    _patch_model_config(monkeypatch)
+    args = _make_args()
+    args.megatron_extra_kwargs = {'accuracy_compatible_loss_sum_dtype': 'bfloat16'}
+    try:
+        utils.get_mcore_model_config(args, PretrainedConfig())
+    except ValueError as error:
+        assert 'accuracy_compatible_loss_sum_dtype' in str(error)
+    else:
+        raise AssertionError('BF16 loss accumulation must fail before constructing the model')
+
+
 def test_get_mcore_model_config_reads_mtp_num_hidden_layers(monkeypatch):
     _patch_model_config(monkeypatch)
     hf_config = PretrainedConfig(text_config=PretrainedConfig(mtp_num_hidden_layers=1))

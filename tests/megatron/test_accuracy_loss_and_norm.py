@@ -10,6 +10,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from swift.megatron.trainers import trainer as trainer_module
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -34,20 +36,18 @@ class AccuracyLossAndNormTest(unittest.TestCase):
         torch.cuda.set_device(0)
         for enabled in (False, True):
             with self.subTest(accuracy=enabled):
-                loss_func = production_function(
-                    'swift/megatron/trainers/trainer.py', 'loss_func', {
-                        'torch': torch,
-                        'mpu': types.SimpleNamespace(get_data_parallel_group=lambda **kwargs: None),
-                        '_use_accuracy_compatible_enabled': lambda: enabled,
-                    })
+                loss_func = trainer_module.MegatronTrainer.loss_func
                 trainer = types.SimpleNamespace(
-                    args=types.SimpleNamespace(enable_dft_loss=False, enable_channel_loss=False))
+                    args=types.SimpleNamespace(enable_dft_loss=False, enable_channel_loss=False),
+                    config=types.SimpleNamespace(accuracy_compatible_loss_sum_dtype='float64'))
                 values = torch.tensor([[2., 19., 3.]], device='cuda', requires_grad=True)
                 labels = torch.tensor([[1, -100, 2]], device='cuda')
                 scale = torch.tensor([[0.5, 1000., 2.]], device='cuda')
                 # A second identical DP rank contributes to reporting, not local backward.
                 with patch.object(torch.distributed, 'all_reduce', side_effect=lambda value, **kwargs: value.mul_(2)), \
                         patch.object(torch.distributed, 'get_rank', return_value=0), \
+                        patch.object(trainer_module.mpu, 'get_data_parallel_group', return_value=None), \
+                        patch.object(trainer_module, '_use_accuracy_compatible_enabled', return_value=enabled), \
                         contextlib.redirect_stdout(io.StringIO()):
                     loss, count, metrics = loss_func(trainer, values, labels=labels, loss_scale=scale)
                 self.assertEqual(loss.item(), 7.)
@@ -56,6 +56,25 @@ class AccuracyLossAndNormTest(unittest.TestCase):
                 self.assertFalse(metrics['loss'].requires_grad)
                 loss.backward()
                 self.assertEqual(values.grad.tolist(), [[0.5, 0., 2.]])
+
+    def test_fp64_compatibility_sum_keeps_small_losses_and_masked_gradients(self):
+        torch.cuda.set_device(0)
+        trainer = types.SimpleNamespace(
+            args=types.SimpleNamespace(enable_dft_loss=False, enable_channel_loss=False),
+            config=types.SimpleNamespace(accuracy_compatible_loss_sum_dtype='float64'))
+        values = torch.tensor([[100000000.] + [1.] * 8 + [100000000.]], device='cuda', requires_grad=True)
+        labels = torch.tensor([[1] * 9 + [-100]], device='cuda')
+        with patch.object(torch.distributed, 'all_reduce'), \
+                patch.object(torch.distributed, 'get_rank', return_value=0), \
+                patch.object(trainer_module.mpu, 'get_data_parallel_group', return_value=None), \
+                patch.object(trainer_module, '_use_accuracy_compatible_enabled', return_value=True), \
+                contextlib.redirect_stdout(io.StringIO()):
+            loss, count, metrics = trainer_module.MegatronTrainer.loss_func(trainer, values, labels=labels)
+        self.assertEqual(loss.item(), 100000008.)
+        self.assertEqual(count.item(), 9)
+        self.assertEqual(metrics['loss'].tolist(), [100000008., 9.])
+        loss.backward()
+        self.assertEqual(values.grad.tolist(), [[1.] * 9 + [0.]])
 
     def test_indexer_norm_preserves_disabled_provider(self):
         native_norm = type('NativeNorm', (), {})

@@ -56,6 +56,8 @@ def get_mcore_model_config(args, hf_config):
     kwargs = hf_to_mcore_config(hf_config)
     llm_config = HfConfigFactory.get_text_config(hf_config)
     n_routed_experts = getattr(llm_config, 'n_routed_experts', None)
+    if getattr(llm_config, 'model_type', None) == 'glm_moe_dsa':
+        kwargs['accuracy_compatible_loss_sum_dtype'] = 'float32'
     if n_routed_experts is not None:
         kwargs['num_moe_experts'] = n_routed_experts
     if getattr(args, 'mtp_num_layers', None) is None:
@@ -97,6 +99,8 @@ def get_mcore_model_config(args, hf_config):
         kwargs['moe_enable_routing_replay'] = True
     if args.megatron_extra_kwargs:
         kwargs.update(args.megatron_extra_kwargs)
+    if kwargs.get('accuracy_compatible_loss_sum_dtype', 'float64') not in {'float32', 'float64'}:
+        raise ValueError('accuracy_compatible_loss_sum_dtype must be float32 or float64')
     config = ModelConfig(**kwargs)
     if is_torch_npu_available() and getattr(args, 'attention_backend', 'flash') != 'local':
         setattr(config, 'use_flash_attn', True)
