@@ -61,6 +61,37 @@ def test_get_mcore_model_config_propagates_accuracy_mode(monkeypatch):
         assert config.kwargs['use_accuracy_compatible'] is enabled
 
 
+def test_sft_pipeline_preserves_explicit_gradient_clipping(monkeypatch):
+    from swift.megatron.pipelines.train import sft
+
+    def initialize_arguments(pipeline, args):
+        pipeline.args = args
+
+    def prepare_template(pipeline):
+        pipeline.template = SimpleNamespace()
+
+    monkeypatch.setattr(sft.SwiftSft.__mro__[1], '__init__', initialize_arguments)
+    monkeypatch.setattr(sft.MegatronSft, '_prepare_template', prepare_template)
+    monkeypatch.setattr(sft, 'repatch', None)
+    for accuracy_enabled in (False, True):
+        monkeypatch.setenv('USE_ACCURACY_COMPATIBLE', str(int(accuracy_enabled)))
+        for clip_grad in (0.0, 0.25, 1.0):
+            saved_clip_values = []
+            args = SimpleNamespace(
+                clip_grad=clip_grad,
+                template_meta=SimpleNamespace(template_cls=None),
+                model_meta=SimpleNamespace(is_multimodal=False),
+                mcore_model=None,
+                output_dir='unused',
+                get_model_processor=lambda **kwargs: (None, None),
+            )
+            args.save_args = lambda _, actual=args, captured=saved_clip_values: captured.append(actual.clip_grad)
+            pipeline = sft.MegatronSft(args)
+            assert pipeline.args.clip_grad == clip_grad
+            assert saved_clip_values == [clip_grad]
+            assert pipeline.template.use_megatron
+
+
 def test_get_mcore_model_config_does_not_enable_mtp_from_checkpoint(monkeypatch):
     _patch_model_config(monkeypatch)
     hf_config = PretrainedConfig(num_nextn_predict_layers=1)
