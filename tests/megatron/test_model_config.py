@@ -103,7 +103,7 @@ def test_get_mcore_model_config_does_not_enable_mtp_from_nested_checkpoint(monke
 
 def test_get_mcore_model_config_prefers_n_routed_experts(monkeypatch):
     _patch_model_config(monkeypatch)
-    hf_config = PretrainedConfig(model_type="glm_moe_dsa", num_experts=256, n_routed_experts=16)
+    hf_config = PretrainedConfig(model_type='glm_moe_dsa', num_experts=256, n_routed_experts=16)
 
     config = utils.get_mcore_model_config(_make_args(), hf_config)
 
@@ -132,9 +132,9 @@ def test_get_padding_to_sequence_parallel_uses_tp_times_two():
         attention_backend='unfused',
     )
     assert get_padding_to(args) == 2
-    args.megatron_extra_kwargs = {"dsa_accuracy_compatible": True}
+    args.megatron_extra_kwargs = {'dsa_accuracy_compatible': True}
     assert get_padding_to(args) == 4
-    args.megatron_extra_kwargs = {"dsa_accuracy_compatible": False}
+    args.megatron_extra_kwargs = {'dsa_accuracy_compatible': False}
     assert get_padding_to(args) == 2
     seq_len = 57
     assert math.ceil(seq_len / 4) * 4 == 60

@@ -183,6 +183,7 @@ def _patch_mcore_bridge_disable_te():
     import mcore_bridge.model.register as mcb_register
 
     def _force_local_spec(orig):
+
         def wrapper(*args, **kwargs):
             kwargs['use_transformer_engine'] = False
             return orig(*args, **kwargs)
