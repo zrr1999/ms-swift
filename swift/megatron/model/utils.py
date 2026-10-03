@@ -5,7 +5,7 @@ from mcore_bridge import get_mcore_model as _get_mcore_model
 from mcore_bridge import hf_to_mcore_config
 from transformers.utils import is_torch_npu_available
 
-from swift.utils import HfConfigFactory, get_logger
+from swift.utils import get_logger
 
 logger = get_logger()
 
@@ -35,25 +35,8 @@ def _check_padding_free(args, config):
         args.padding_free = False
 
 
-def _check_dsa_index_share_recompute(config):
-    """Reject activation replay that omits a DSA skip layer's source indexer."""
-    if (config.experimental_attention_variant == 'dsa' and (getattr(config, 'dsa_indexer_topk_freq', 1) or 1) > 1
-            and getattr(config, 'recompute_granularity', None) not in {None, 'none'}):
-        raise ValueError(
-            'DSA cross-layer top-k sharing is incompatible with activation recompute because a skip layer may be '
-            'replayed without its source computing layer. Set recompute_granularity=none.')
-
-
 def get_mcore_model_config(args, hf_config):
     kwargs = hf_to_mcore_config(hf_config)
-    llm_config = HfConfigFactory.get_text_config(hf_config)
-    n_routed_experts = getattr(llm_config, 'n_routed_experts', None)
-    if getattr(llm_config, 'model_type', None) == 'glm_moe_dsa':
-        kwargs['accuracy_compatible_loss_sum_dtype'] = 'float32'
-        if n_routed_experts is not None:
-            kwargs['num_moe_experts'] = n_routed_experts
-    # Checkpoint MTP metadata describes available weights, not an opt-in to
-    # auxiliary training. The explicit mtp_num_layers argument below controls it.
     kwargs['mcore_model_type'] = args.megatron_model_meta.model_type
     kwargs['hf_config'] = hf_config
     for f in fields(ModelConfig):
@@ -89,14 +72,11 @@ def get_mcore_model_config(args, hf_config):
         kwargs['moe_enable_routing_replay'] = True
     if args.megatron_extra_kwargs:
         kwargs.update(args.megatron_extra_kwargs)
-    if kwargs.get('accuracy_compatible_loss_sum_dtype', 'float64') not in {'float32', 'float64'}:
-        raise ValueError('accuracy_compatible_loss_sum_dtype must be float32 or float64')
     config = ModelConfig(**kwargs)
     if is_torch_npu_available() and getattr(args, 'attention_backend', 'flash') != 'local':
         setattr(config, 'use_flash_attn', True)
     _check_attention_backend(args, config)
     _check_padding_free(args, config)
-    _check_dsa_index_share_recompute(config)
     return config
 
 

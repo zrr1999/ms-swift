@@ -22,11 +22,6 @@ from swift.utils import (HfConfigFactory, disable_safe_ddp_context_use_barrier, 
 logger = get_logger()
 
 
-def _get_save_processor_id(args):
-    """Use the configured processor source when weights and tokenizer are independent."""
-    return getattr(args, 'tokenizer_name_or_path', None) or args.model_dir
-
-
 def _patch__batched_p2p_ops():
     from megatron.core.pipeline_parallel import p2p_communication
 
@@ -193,22 +188,6 @@ def _patch_mcore_bridge_disable_te():
     mcb_register.get_gpt_decoder_block_spec = _force_local_spec(mcb_register.get_gpt_decoder_block_spec)
     mcb_register.get_gpt_mtp_block_spec = _force_local_spec(mcb_register.get_gpt_mtp_block_spec)
 
-    # 1b) DSA is swapped in after the decoder spec via ModelLoader._replace_spec_dsa,
-    # which called _get_backend_spec_provider (TESpecProvider). That left TELinear /
-    # TENorm on DSA indexer + MLA while PaddleFleet HAVE_TE is False. E-259: remaining
-    # Torch DSA TE contaminated post_attn_norm. Force LocalSpecProvider instead.
-    from megatron.core.models.gpt import experimental_attention_variant_module_specs as _eav
-
-    origin_backend_spec_provider = _eav._get_backend_spec_provider
-
-    def _local_backend_spec_provider(config):
-        if not getattr(config, 'dsa_accuracy_compatible', False):
-            return origin_backend_spec_provider(config)
-        from megatron.core.models.backends import LocalSpecProvider
-        return LocalSpecProvider()
-
-    _eav._get_backend_spec_provider = _local_backend_spec_provider
-
     # 2) persist_layer_norm=False on the model config (dataclass default is baked into
     #    __init__, so flip it on the instance via __post_init__).
     from mcore_bridge.config.model_config import ModelConfig as McbModelConfig
@@ -243,105 +222,16 @@ def _patch_mcore_bridge_disable_te():
         return hf_state_dict
 
     McbGPTBridge._set_layer_attn = _set_layer_attn
-
-    # Dense local MLPs store their norm separately from linear_fc1. Keep the
-    # bridge's load/export logic, correcting only this TE-specific parameter key.
-    origin_set_state_dict = McbGPTBridge._set_state_dict
-
-    def _set_state_dict(self, mg_module, mg_key, hf_state_dict, hf_key, to_mcore, **kwargs):
-        if mg_key == 'mlp.linear_fc1.layer_norm_weight':
-            fc1 = getattr(getattr(mg_module, 'mlp', None), 'linear_fc1', None)
-            if getattr(fc1, 'layer_norm_weight', None) is None:
-                mg_key = 'pre_mlp_layernorm.weight'
-        return origin_set_state_dict(self, mg_module, mg_key, hf_state_dict, hf_key, to_mcore, **kwargs)
-
-    McbGPTBridge._set_state_dict = _set_state_dict
-    logger.info(
-        'mcore_bridge patched for TE-off alignment (local spec, persist_layer_norm=False, input_layernorm+mlp-norm map)'
-    )
-
-
-def _patch_mcore_bridge_tp1_accuracy():
-    """Apply the DSA TP1 graph choice only within the configured bridge instance."""
-    from contextvars import ContextVar
-    from functools import wraps
-    from mcore_bridge.model.modules import mtp_layer, transformer_block
-
-    active = ContextVar('swift_dsa_tp1_accuracy', default=False)
-
-    def scoped(method):
-
-        @wraps(method)
-        def call(self, *args, **kwargs):
-            config = self.config
-            token = active.set(
-                getattr(config, 'dsa_accuracy_compatible', False) and config.tensor_model_parallel_size <= 1)
-            try:
-                return method(self, *args, **kwargs)
-            finally:
-                active.reset(token)
-
-        return call
-
-    def patch_module(module, cls, methods):
-        original = module.make_viewless_tensor
-        if getattr(original, '_swift_tp1_accuracy_patch', False):
-            return
-
-        def make_viewless_tensor(inp, requires_grad, keep_graph):
-            if active.get():
-                return inp
-            return original(inp=inp, requires_grad=requires_grad, keep_graph=keep_graph)
-
-        make_viewless_tensor._swift_tp1_accuracy_patch = True
-        module.make_viewless_tensor = make_viewless_tensor
-        if hasattr(module, 'gather_from_tensor_model_parallel_region'):
-            original_gather = module.gather_from_tensor_model_parallel_region
-
-            def gather(input_, group=None):
-                if active.get() and (group is None or group.size() <= 1):
-                    return input_
-                return original_gather(input_, group=group)
-
-            module.gather_from_tensor_model_parallel_region = gather
-        for name in methods:
-            setattr(cls, name, scoped(getattr(cls, name)))
-
-    patch_module(mtp_layer, mtp_layer.MultiTokenPredictionLayer, ('_concat_embeddings', '_get_embeddings'))
-    patch_module(transformer_block, transformer_block.TransformerBlock, ('forward', ))
+    logger.info('mcore_bridge patched for TE-off alignment (local spec, persist_layer_norm=False, input_layernorm map)')
 
 
 def _patch_mcore_bridge():
     require_version('mcore-bridge>=1.4.0', 'please install mcore-bridge via `pip install mcore-bridge -U`')
     import mcore_bridge
     from mcore_bridge import GPTBridge
-    from mcore_bridge.model.register import ModelLoader
     logger.info(f'mcore_bridge.__version__: {mcore_bridge.__version__}')
     if _use_accuracy_compatible_enabled():
         _patch_mcore_bridge_disable_te()
-        _patch_mcore_bridge_tp1_accuracy()
-    if not getattr(ModelLoader._replace_spec_dsa, '_swift_norm_accuracy_patch', False):
-        origin_replace_spec_dsa = ModelLoader._replace_spec_dsa
-
-        def replace_spec_dsa(self, layer_spec):
-            origin_replace_spec_dsa(self, layer_spec)
-            from megatron.core.transformer.torch_norm import WrappedTorchNorm
-
-            dsa_spec = layer_spec.submodules.self_attention
-            if getattr(self.config, 'norm_accuracy_compatible', False):
-                dsa_spec.submodules.q_layernorm = WrappedTorchNorm
-                dsa_spec.submodules.kv_layernorm = WrappedTorchNorm
-            indexer = getattr(
-                getattr(dsa_spec.submodules.core_attention, 'submodules', None),
-                'indexer',
-                None,
-            )
-            if (getattr(self.config, 'norm_accuracy_compatible', False) and indexer is not None
-                    and getattr(indexer, 'submodules', None) is not None):
-                indexer.submodules.k_norm = WrappedTorchNorm
-
-        replace_spec_dsa._swift_norm_accuracy_patch = True
-        ModelLoader._replace_spec_dsa = replace_spec_dsa
     origin_save_weights = GPTBridge.save_weights
 
     def save_weights(
@@ -366,11 +256,7 @@ def _patch_mcore_bridge():
             else:
                 with torch.device('meta'), disable_safe_ddp_context_use_barrier():
                     self.hf_model = get_model_processor(
-                        args.model_dir,
-                        model_type=args.model_type,
-                        return_dummy_model=True,
-                        processor_id_or_path=_get_save_processor_id(args),
-                    )[0]
+                        args.model_dir, model_type=args.model_type, return_dummy_model=True)[0]
 
         if is_master():
             if peft_format:
