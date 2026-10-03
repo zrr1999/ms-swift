@@ -549,7 +549,6 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
     start_weight_decay: Optional[float] = None
     end_weight_decay: Optional[float] = None
     clip_grad: float = 1.
-    native_unfused_adamw: bool = False
     adam_beta1: float = 0.9
     adam_beta2: float = 0.95
     adam_eps: float = 1e-8
@@ -609,7 +608,6 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
     overlap_param_gather: bool = False
     overlap_param_gather_with_optimizer_step: bool = False
     align_grad_reduce: bool = True
-    deterministic_mode: bool = False
     # Eagerly create NCCL communicators before the training loop to avoid the lazy
     # first-use allocation hitting the iteration-1 memory peak (Failed to CUDA calloc async).
     nccl_comm_warmup: bool = False

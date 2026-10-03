@@ -1,6 +1,5 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
 import gc
-import os
 import torch
 from accelerate.utils import gather as hf_gather
 from accelerate.utils import gather_object as hf_gather_object
@@ -401,10 +400,6 @@ def prepare_batch(args, data, vp_stage=None):
         if num_samples is not None:
             batch['packed_seq_params'].num_samples = num_samples
     batch = get_batch_on_this_cp_rank(args, batch)
-    if os.environ.get('MODEL_REPRO_INPUT_RECEIPT_PATH') and seq_lens is not None:
-        # Opt-in metadata for the owning-loader receipt. MegatronTrainer removes
-        # it before model(**data), so it cannot alter the numerical path.
-        batch['_model_repro_seq_lens'] = [int(length) for length in seq_lens]
     return batch
 
 

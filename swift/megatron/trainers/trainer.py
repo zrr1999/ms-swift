@@ -1,7 +1,4 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
-import hashlib
-import json
-import os
 import torch
 import torch.distributed as dist
 import torch.nn
@@ -19,100 +16,7 @@ from .base import BaseMegatronTrainer
 logger = get_logger()
 
 
-def project_owning_loader_semantics(input_values, model_label_values, semantic_length, labels_were_shifted=True):
-    """Normalize padded Megatron carrier tensors back to the dataset semantic row."""
-    semantic_length = int(semantic_length)
-    if semantic_length <= 0 or semantic_length > len(input_values) or semantic_length > len(model_label_values):
-        raise ValueError(f'invalid owning-loader semantic length {semantic_length} for carrier lengths '
-                         f'{len(input_values)}/{len(model_label_values)}')
-    semantic_input_values = input_values[:semantic_length]
-    normalized_label_values = model_label_values
-    if labels_were_shifted and model_label_values:
-        # get_batch_on_this_pp_rank rolls causal-LM labels left by one before
-        # model forward. Reverse that roll for a framework-neutral dataset receipt.
-        normalized_label_values = model_label_values[-1:] + model_label_values[:-1]
-    semantic_label_values = normalized_label_values[:semantic_length]
-    semantic_mask_values = [label != -100 for label in semantic_label_values]
-    return semantic_input_values, semantic_label_values, semantic_mask_values
-
-
 class MegatronTrainer(BaseMegatronTrainer):
-
-    def _write_input_contract_once(self, data, seq_lens=None):
-        path = os.environ.get('MODEL_REPRO_INPUT_RECEIPT_PATH')
-        if not path or getattr(self, '_input_contract_written', False):
-            return
-        if not mpu.is_pipeline_last_stage(ignore_virtual=False):
-            return
-        if (torch.distributed.is_initialized()
-                and torch.distributed.get_rank() != torch.distributed.get_world_size() - 1):
-            return
-        input_ids = data.get('input_ids')
-        labels = data.get('labels')
-        if input_ids is None or labels is None:
-            return
-
-        def values(tensor):
-            return tensor.detach().to(device='cpu', dtype=torch.int64).reshape(-1).tolist()
-
-        def digest(items):
-            return hashlib.sha256(json.dumps(items, separators=(',', ':')).encode()).hexdigest()
-
-        input_values = values(input_ids)
-        label_values = values(labels)
-        model_mask_values = [label != -100 for label in label_values]
-        semantic_length = seq_lens[0] if seq_lens else len(input_values)
-        labels_were_shifted = self.args.task_type == 'causal_lm'
-        semantic_input_values, semantic_label_values, semantic_mask_values = project_owning_loader_semantics(
-            input_values, label_values, semantic_length, labels_were_shifted)
-        payload = {
-            'schema': 'glm52-owning-loader-input/v1',
-            'framework': 'torch',
-            'rank': torch.distributed.get_rank() if torch.distributed.is_initialized() else 0,
-            'step': self.state.iteration + 1,
-            'input_ids': {
-                'shape': list(input_ids.shape),
-                'dtype': str(input_ids.dtype),
-                'count': len(input_values),
-                'sha256': digest(input_values),
-            },
-            'labels': {
-                'shape': list(labels.shape),
-                'dtype': str(labels.dtype),
-                'count': len(label_values),
-                'supervised_count': sum(model_mask_values),
-                'sha256': digest(label_values),
-                'projection': 'model_next_token_labels',
-            },
-            'loss_mask': {
-                'shape': list(labels.shape),
-                'dtype': 'bool',
-                'count': len(model_mask_values),
-                'supervised_count': sum(model_mask_values),
-                'sha256': digest(model_mask_values),
-            },
-            'semantic': {
-                'input_token_count': len(semantic_input_values),
-                'supervised_target_count': sum(semantic_mask_values),
-                'input_ids_sha256': digest(semantic_input_values),
-                'labels_sha256': digest(semantic_label_values),
-                'loss_mask_sha256': digest(semantic_mask_values),
-                'projection': 'dataset_row_before_megatron_padding_and_label_roll',
-            },
-            'carrier_padding': {
-                'count': len(input_values) - len(semantic_input_values),
-                'input_ids_sha256': digest(input_values[len(semantic_input_values):]),
-                'labels_sha256': digest(label_values[len(semantic_input_values):]),
-            },
-            'ignore_index': -100,
-            'dataset': os.environ.get('MODEL_REPRO_INPUT_DATASET_PATH'),
-        }
-        path = os.path.abspath(os.path.expanduser(path))
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, 'w', encoding='utf-8') as stream:
-            json.dump(payload, stream, ensure_ascii=False, indent=2, sort_keys=True)
-            stream.write('\n')
-        self._input_contract_written = True
 
     def seq_cls_loss_func(self, output_tensor, *, labels: torch.Tensor, packed_seq_params=None, attention_mask=None):
         args = self.args
@@ -157,11 +61,11 @@ class MegatronTrainer(BaseMegatronTrainer):
             losses = losses * torch.exp(-losses.detach())
         if loss_scale is not None:
             losses = losses * loss_scale
-        masked_losses = losses * loss_mask
-        if _use_accuracy_compatible_enabled() and self.config.accuracy_compatible_loss_sum_dtype == 'float64':
-            loss_sum = masked_losses.reshape(-1).double().sum().float()
+        from megatron.core.transformer.module import _use_accuracy_compatible
+        if _use_accuracy_compatible():
+            loss_sum = (losses * loss_mask).reshape(-1).double().sum().float()
         else:
-            loss_sum = torch.sum(masked_losses)
+            loss_sum = torch.sum(losses * loss_mask)
         loss = torch.cat([loss_sum.view(1), loss_mask.sum().view(1)])
 
         # Reduce loss for logging.
@@ -221,8 +125,6 @@ class MegatronTrainer(BaseMegatronTrainer):
     def forward_step(self, data_iterator, model):
         vp_stage = model.module.module.vp_stage
         data = self.get_batch(data_iterator, vp_stage)
-        seq_lens = data.pop('_model_repro_seq_lens', None)
-        self._write_input_contract_once(data, seq_lens)
         loss_scale = data.pop('loss_scale', None)
         channels = data.pop('channel', None)
         labels = data.get('labels')

@@ -212,9 +212,6 @@ def get_padding_to(args):
     padding_to = None
     if args.tensor_model_parallel_size > 1 and args.sequence_parallel:
         padding_to = args.tensor_model_parallel_size
-        # Match the DSA reference carrier without changing other TP+SP models.
-        if (getattr(args, 'megatron_extra_kwargs', None) or {}).get('dsa_accuracy_compatible', False):
-            padding_to *= 2
     if args.context_parallel_size > 1:
         padding_to = (padding_to or 1) * args.context_parallel_size
     origin_padding_to = padding_to
