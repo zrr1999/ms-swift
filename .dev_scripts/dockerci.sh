@@ -2,6 +2,7 @@
 MODELSCOPE_CACHE_DIR_IN_CONTAINER=/modelscope_cache
 CODE_DIR=$PWD
 CODE_DIR_IN_CONTAINER=/ms-swift
+SOURCE_DIR_IN_CONTAINER=/ms-swift-source
 MODELSCOPE_SDK_DEBUG=True
 echo "$USER"
 gpus='0,1 2,3'
@@ -31,7 +32,7 @@ do
     docker run --rm --name $CONTAINER_NAME --shm-size=16gb \
               --cpuset-cpus=${cpu_sets_arr[$idx]} \
               --gpus='"'"device=$gpu"'"' \
-              -v $CODE_DIR:$CODE_DIR_IN_CONTAINER \
+              -v "$CODE_DIR:$SOURCE_DIR_IN_CONTAINER:ro" \
               -v $MODELSCOPE_CACHE:$MODELSCOPE_CACHE_DIR_IN_CONTAINER \
               -v $MODELSCOPE_HOME_CACHE/$idx:/root \
               -v /home/admin/pre-commit:/home/admin/pre-commit \
@@ -51,12 +52,13 @@ do
 	            -e PR_CHANGED_FILES=$PR_CHANGED_FILES \
               --workdir=$CODE_DIR_IN_CONTAINER \
               ${IMAGE_NAME}:${IMAGE_VERSION} \
-              $CI_COMMAND
+              bash "$SOURCE_DIR_IN_CONTAINER/.dev_scripts/ci_source_copy.sh" \
+              "$SOURCE_DIR_IN_CONTAINER" $CI_COMMAND
   else
     docker run --rm --name $CONTAINER_NAME --shm-size=16gb \
               --cpuset-cpus=${cpu_sets_arr[$idx]} \
               --gpus='"'"device=$gpu"'"' \
-              -v $CODE_DIR:$CODE_DIR_IN_CONTAINER \
+              -v "$CODE_DIR:$SOURCE_DIR_IN_CONTAINER:ro" \
               -v $MODELSCOPE_CACHE:$MODELSCOPE_CACHE_DIR_IN_CONTAINER \
               -v $MODELSCOPE_HOME_CACHE/$idx:/root \
               -v /home/admin/pre-commit:/home/admin/pre-commit \
@@ -75,7 +77,8 @@ do
 	            -e PR_CHANGED_FILES=$PR_CHANGED_FILES \
               --workdir=$CODE_DIR_IN_CONTAINER \
               ${IMAGE_NAME}:${IMAGE_VERSION} \
-              $CI_COMMAND
+              bash "$SOURCE_DIR_IN_CONTAINER/.dev_scripts/ci_source_copy.sh" \
+              "$SOURCE_DIR_IN_CONTAINER" $CI_COMMAND
   fi
   if [ $? -ne 0 ]; then
     echo "Running test case failed, please check the log!"
