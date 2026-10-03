@@ -10,9 +10,9 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Set up Python 3.10
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.10'
       - name: Install pre-commit hook
@@ -20,3 +20,5 @@ jobs:
           pip install pre-commit
       - name: Linting
         run: pre-commit run --all-files
+      - name: CI source isolation regression tests
+        run: python .dev_scripts/test_ci_source_copy.py
