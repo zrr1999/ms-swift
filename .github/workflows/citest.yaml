@@ -70,6 +70,30 @@ jobs:
       - name: Checkout LFS objects
         working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
+          set -euo pipefail
+          if ! git lfs version; then
+            case "$(uname -m)" in
+              x86_64)
+                architecture=amd64
+                digest=e455e00f15d9b95661b8d53498ffb0c3367962cf1ec73c31ab7369516cd6ab8d
+                ;;
+              aarch64)
+                architecture=arm64
+                digest=ac9c8efac980bb0505ead384d087e2acb6486fd8498691a2165fa174ec6118c2
+                ;;
+              *) echo "Unsupported Git LFS host architecture" >&2; exit 1 ;;
+            esac
+            tool_dir="$(mktemp -d "${RUNNER_TEMP:?}/git-lfs.XXXXXX")"
+            trap 'rm -rf -- "${tool_dir:?}"' EXIT
+            archive="$tool_dir/git-lfs.tar.gz"
+            curl --fail --location --retry 3 \
+              "https://github.com/git-lfs/git-lfs/releases/download/v3.8.0/git-lfs-linux-$architecture-v3.8.0.tar.gz" \
+              --output "$archive"
+            echo "$digest  $archive" | sha256sum --check -
+            tar -xzf "$archive" -C "$tool_dir" --strip-components=1 git-lfs-3.8.0/git-lfs
+            export PATH="$tool_dir:$PATH"
+            git lfs version
+          fi
           git lfs fetch origin "$GITHUB_SHA"
           git lfs checkout
       - name: Run unittest
