@@ -43,15 +43,21 @@ jobs:
       CI_CHECKOUT_PATH: .citest-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Checkout
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        shell: bash
         env:
           GIT_CONFIG_PARAMETERS: "'core.hooksPath='"
-        with:
-            path: ${{ env.CI_CHECKOUT_PATH }}
-            persist-credentials: false
-            lfs: 'true'
-            submodules: 'false'
-            fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 0 }}
+        run: |
+          set -euo pipefail
+          mkdir -- "$CI_CHECKOUT_PATH"
+          cd "$CI_CHECKOUT_PATH"
+          git init
+          git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          fetch_options=()
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            fetch_options+=(--depth=2)
+          fi
+          git fetch --no-tags "${fetch_options[@]}" origin "$GITHUB_SHA"
+          GIT_LFS_SKIP_SMUDGE=1 git checkout --detach "$GITHUB_SHA"
       - name: Get changed files
         id: changed-files
         working-directory: ${{ env.CI_CHECKOUT_PATH }}
@@ -63,7 +69,9 @@ jobs:
             fi
       - name: Checkout LFS objects
         working-directory: ${{ env.CI_CHECKOUT_PATH }}
-        run: git lfs checkout
+        run: |
+          git lfs fetch origin "$GITHUB_SHA"
+          git lfs checkout
       - name: Run unittest
         shell: bash
         working-directory: ${{ env.CI_CHECKOUT_PATH }}
