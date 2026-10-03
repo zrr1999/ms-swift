@@ -94,8 +94,10 @@ jobs:
             export PATH="$tool_dir:$PATH"
             git lfs version
           fi
+          git lfs install --local --skip-smudge --skip-repo
           git lfs fetch origin "$GITHUB_SHA"
           git lfs checkout
+          git lfs fsck
       - name: Run unittest
         shell: bash
         working-directory: ${{ env.CI_CHECKOUT_PATH }}
